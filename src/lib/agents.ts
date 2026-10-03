@@ -1,4 +1,4 @@
-// Custom sub-agent types — the `.anycode/agents/*.md` loader that lets a project
+// Custom sub-agent types — the `.meowcode/agents/*.md` loader that lets a project
 // (or the user) define named sub-agents beyond the built-in general/explore/code/
 // plan roles, mirroring Claude Code's `.claude/agents/*.md`. Each file is a
 // Markdown doc with front-matter (name, description, optional tools, optional
@@ -31,7 +31,7 @@ export function agentDirs(cwd = process.cwd()): string[] {
   const dirs: string[] = []
   const entry = activeEntry()
   if (entry) dirs.push(path.join(entry.dir, 'agents'))
-  dirs.push(path.join(os.homedir(), '.anycode', 'agents'), path.join(cwd, '.anycode', 'agents'))
+  dirs.push(path.join(os.homedir(), '.meowcode', 'agents'), path.join(cwd, '.meowcode', 'agents'))
   return dirs
 }
 

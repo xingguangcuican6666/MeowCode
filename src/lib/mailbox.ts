@@ -5,7 +5,7 @@ import { stateDir } from './entries'
 // A tiny file-based mailbox so concurrent MeowCode sessions (same machine, same
 // user) can message each other — what the `otherSessionMessages` setting
 // surfaces ('off' | 'notify' | 'deliver'). Everything lives under the mailbox
-// state dir (~/.anycode/mailbox/, or the active entry's own mailbox/): one JSON
+// state dir (~/.meowcode/mailbox/, or the active entry's own mailbox/): one JSON
 // file per message, plus a presence/ subdir where each running session
 // heartbeats a file so peers can be listed and DM'd.
 //
@@ -15,7 +15,7 @@ import { stateDir } from './entries'
 // presence files are garbage-collected on access.
 
 // Both dirs resolve at CALL time so they follow the active entry (global mode
-// yields the legacy ~/.anycode/mailbox path, byte-for-byte).
+// yields the legacy ~/.meowcode/mailbox path, byte-for-byte).
 function dir(): string {
   return stateDir('mailbox')
 }

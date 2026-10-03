@@ -14,7 +14,7 @@ import { displayWidth } from '../lib/text'
 // graph. Two sub-views — Overview (headline numbers + an activity heatmap) and
 // Models (per-model token share). Purely presentational: the parent
 // (SettingsPanel) owns the sub/range selection and passes them as props; the
-// lifetime store is read from ~/.anycode/stats.json (see lib/stats).
+// lifetime store is read from ~/.meowcode/stats.json (see lib/stats).
 
 export type StatsSub = 'overview' | 'models'
 

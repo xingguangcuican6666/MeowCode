@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 
 // Real-time inter-session transport over Unix-domain sockets. Each running
-// MeowCode session listens on ~/.anycode/ipc/<id>.sock; peers connect and write
+// MeowCode session listens on ~/.meowcode/ipc/<id>.sock; peers connect and write
 // newline-delimited JSON frames for INSTANT delivery — complementing the
 // file-based mailbox (lib/mailbox.ts), which stays as a durable fallback and the
 // source of presence/listing. A message frame carries the SAME id its fallback
@@ -15,7 +15,7 @@ import os from 'node:os'
 // mailbox still delivers. Unix sockets are a Unix/macOS feature; where they're
 // unavailable, creation simply fails and we fall back silently.
 
-const DIR = path.join(os.homedir(), '.anycode', 'ipc')
+const DIR = path.join(os.homedir(), '.meowcode', 'ipc')
 
 export type FrameKind = 'msg' | 'idle' | 'sub' | 'unsub'
 export interface SockFrame {

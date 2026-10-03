@@ -17,7 +17,7 @@ export function formatLoop(l: ActiveLoop): string {
   return `Looping "${l.payload}" ${cadence} · ${l.runs} run${l.runs === 1 ? '' : 's'} done · /loop stop to cancel`
 }
 
-// A goal AnyCode autonomously works toward, like Claude Code's /goal. `startedAt`
+// A goal MeowCode autonomously works toward, like Claude Code's /goal. `startedAt`
 // drives the live "◎ /goal active (Ns)" timer; `runs` counts turns spent on it.
 // `paused` freezes the autonomous loop (esc, or a turn that got no model
 // response) WITHOUT clearing the goal — the driver skips a paused goal and waits

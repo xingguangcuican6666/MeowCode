@@ -17,7 +17,7 @@ export function commandDirs(cwd = process.cwd()): string[] {
   const dirs: string[] = []
   const entry = activeEntry()
   if (entry) dirs.push(path.join(entry.dir, 'commands'))
-  dirs.push(path.join(os.homedir(), '.anycode', 'commands'), path.join(cwd, '.anycode', 'commands'))
+  dirs.push(path.join(os.homedir(), '.meowcode', 'commands'), path.join(cwd, '.meowcode', 'commands'))
   return dirs
 }
 

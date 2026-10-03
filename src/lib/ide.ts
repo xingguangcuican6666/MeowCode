@@ -6,7 +6,7 @@ import os from 'node:os'
 // integration needs a MeowCode IDE extension (not built yet), so this does what
 // it honestly can WITHOUT one: recognize when we're running inside an editor's
 // integrated terminal (from the env it sets), and otherwise scan for lock files
-// a future extension would drop under ~/.anycode/ide/. It never opens a socket
+// a future extension would drop under ~/.meowcode/ide/. It never opens a socket
 // or claims a live connection — callers report detection, not a handshake.
 
 export interface IdeLock {
@@ -27,7 +27,7 @@ export interface IdeStatus {
   external: IdeLock[]
 }
 
-const LOCK_DIR = path.join(os.homedir(), '.anycode', 'ide')
+const LOCK_DIR = path.join(os.homedir(), '.meowcode', 'ide')
 
 // Recognize an IDE's integrated terminal from the environment it injects.
 function integratedIde(env: NodeJS.ProcessEnv): string | undefined {

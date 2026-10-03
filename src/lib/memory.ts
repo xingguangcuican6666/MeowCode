@@ -1,13 +1,13 @@
 // Cross-session memory for MeowCode — a structured, file-based knowledge base
 // modeled on a real agent memory tool (not a flat notes list). Each fact is one
-// Markdown file under ~/.anycode/memory/ with front-matter (name / description /
+// Markdown file under ~/.meowcode/memory/ with front-matter (name / description /
 // type / timestamps); an MEMORY.md index lists them one line each and is what we
 // inject into the system preamble every turn so the model knows what it can
 // recall. The model reads/writes entries autonomously via the `memory` tool
 // (see tools/memory-tool.ts); the user browses/edits them via `/memory`.
 //
 // The transient loop *goal* (set by /goal, judged by lib/goalJudge) is a separate
-// concern and stays in ~/.anycode/memory.json — it is a standing directive, not a
+// concern and stays in ~/.meowcode/memory.json — it is a standing directive, not a
 // remembered fact. loadMemory()/setGoal() below manage only that.
 import os from 'node:os'
 import path from 'node:path'
@@ -22,10 +22,10 @@ export interface GoalStore {
 }
 
 // The goal store's file, resolved at CALL time so it follows the active entry:
-// ~/.anycode/memory.json in global mode (the legacy path, byte-for-byte), or
+// ~/.meowcode/memory.json in global mode (the legacy path, byte-for-byte), or
 // <entry>/memory.json when one is active.
 function memoryFile(): string {
-  return activeEntry() ? path.join(activeEntry()!.dir, 'memory.json') : path.join(os.homedir(), '.anycode', 'memory.json')
+  return activeEntry() ? path.join(activeEntry()!.dir, 'memory.json') : path.join(os.homedir(), '.meowcode', 'memory.json')
 }
 
 export function loadMemory(): GoalStore {
@@ -76,7 +76,7 @@ function migrateNotes(notes: unknown[]): void {
 // Two scopes, mirroring Claude Code: a GLOBAL store shared across every project
 // (the user's identity/preferences), and a per-PROJECT (workspace) store keyed by
 // the working directory, so a project's facts don't leak into unrelated sessions.
-// Both live under the active state root (global: ~/.anycode; entry: the entry's
+// Both live under the active state root (global: ~/.meowcode; entry: the entry's
 // own dir) — global at <root>/memory/, project at <root>/projects/<cwd-slug>/memory/
 // — and never in the repo. Each scope has its own MEMORY.md index. Saves default
 // to the current workspace.
@@ -97,7 +97,7 @@ export interface MemoryEntry {
 }
 
 // The global store, shared across every project — the entry's own memory/ when an
-// entry is active, else the legacy ~/.anycode/memory. Resolved at call time.
+// entry is active, else the legacy ~/.meowcode/memory. Resolved at call time.
 function globalMemoryDir(): string {
   return stateDir('memory')
 }

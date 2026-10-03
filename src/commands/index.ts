@@ -717,7 +717,7 @@ const permissions: SlashCommand = {
 }
 
 // --- /resume: reopen a previously saved session (its whole transcript) ---
-// Sessions autosave to ~/.anycode/sessions/ as you work; /resume opens a picker of
+// Sessions autosave to ~/.meowcode/sessions/ as you work; /resume opens a picker of
 // the newest first. Selecting one remounts the app seeded with that transcript
 // (see app.tsx onResume). `meowcode --continue` reopens the latest without the UI.
 const resume: SlashCommand = {
@@ -746,7 +746,7 @@ const fork: SlashCommand = {
 }
 
 // --- /agents: list the sub-agent types available to task/plan/workflow —
-// built-in roles plus custom ones from .anycode/agents/*.md (read-only, mirrors
+// built-in roles plus custom ones from .meowcode/agents/*.md (read-only, mirrors
 // /mcp and /hooks). Defining a new agent is a Markdown file, not a command. ---
 const agents: SlashCommand = {
   name: 'agents',
@@ -798,7 +798,7 @@ const theme: SlashCommand = {
   },
 }
 
-// --- /goal: an objective AnyCode autonomously works toward until satisfied ---
+// --- /goal: an objective MeowCode autonomously works toward until satisfied ---
 // Like Claude Code's /goal: setting one kicks off work immediately, shows a live
 // "◎ /goal active (Ns)" indicator, keeps driving turns until the model signals
 // completion (GOAL_COMPLETE, injected via the system preamble), and auto-clears.
@@ -1108,7 +1108,7 @@ const editor: SlashCommand = {
   },
 }
 
-// --- /feedback: capture a feedback report to ~/.anycode/feedback/ (the
+// --- /feedback: capture a feedback report to ~/.meowcode/feedback/ (the
 // `draftedFeedback` setting). Bare `/feedback` with drafting on asks the model to
 // draft one for you to review; otherwise it prints usage. `/feedback <text>`
 // saves the report immediately.
@@ -1362,7 +1362,7 @@ const entry: SlashCommand = {
 
 const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, entry, resume, fork, version, exit]
 
-// Merge user-defined commands (from ~/.anycode/commands and ./.anycode/commands)
+// Merge user-defined commands (from ~/.meowcode/commands and ./.meowcode/commands)
 // into the registry, but never let them shadow a built-in name or alias. Loaded
 // once at startup; new command files are picked up on the next launch.
 function buildRegistry(): SlashCommand[] {

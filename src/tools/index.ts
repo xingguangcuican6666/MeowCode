@@ -9,7 +9,7 @@ export type { ToolContext, ToolDef, ToolResult, SpawnOpts, SpawnResult } from '.
 export { TOOLS } from './impl'
 export { renderWorkflowReport } from './impl'
 
-// Patch the dynamic `subagent_type` enum (built-in roles + custom .anycode/agents)
+// Patch the dynamic `subagent_type` enum (built-in roles + custom .meowcode/agents)
 // into a cloned schema for the task/workflow tools, so the model sees the custom
 // agents available in `cwd`. Other tools pass through unchanged.
 function withDynamicEnums(name: string, schema: Record<string, unknown>, cwd: string): Record<string, unknown> {

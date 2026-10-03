@@ -2,7 +2,7 @@
 // on a real agent memory tool. The model saves durable facts it learns and reads
 // them back in later sessions; the store is file-based (see lib/memory). Memory
 // has two scopes: a per-project WORKSPACE store (the default, keyed by cwd) and a
-// cross-project GLOBAL store. Writes land only under ~/.anycode/ (never the repo,
+// cross-project GLOBAL store. Writes land only under ~/.meowcode/ (never the repo,
 // never secrets), so the tool is read-only from the *project tree's* point of view
 // and auto-runs like the search tools rather than prompting (see tools/permission).
 import type { ToolDef, ToolResult } from './types'

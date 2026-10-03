@@ -10,7 +10,7 @@ import { useT } from '../lib/i18n'
 
 // Interactive /login overlay. Keeps credentials out of the chat transcript: the
 // key/password are typed here (masked) and written straight to
-// ~/.anycode/credentials.json, never echoed back into the conversation.
+// ~/.meowcode/credentials.json, never echoed back into the conversation.
 //
 // Flow: base URL → method (paste sk- key | username+password) → the chosen
 // inputs → optional 2FA → save. Owns the keyboard via its own useInput while

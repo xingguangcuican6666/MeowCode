@@ -331,7 +331,7 @@ export type PanelTab = 'settings' | 'status' | 'config' | 'usage' | 'stats'
 
 /**
  * A user-defined provider speaking the Anthropic Messages protocol (A协议). The
- * default AnyCode vendor is stubbed for now (see providers/index.ts); until it's
+ * default MeowCode vendor is stubbed for now (see providers/index.ts); until it's
  * wired, these custom Anthropic-compatible endpoints are the only way to add a
  * provider. Costs are always computed at the OFFICIAL rate table (see
  * lib/pricing) regardless of the actual vendor.
@@ -414,7 +414,7 @@ export interface CommandContext {
   stopLoop?: () => void
   /** A one-line description of the active loop, or null if none. */
   loopStatus?: () => string | null
-  /** Start (or replace) the active goal AnyCode autonomously works toward (interactive sessions only). */
+  /** Start (or replace) the active goal MeowCode autonomously works toward (interactive sessions only). */
   startGoal?: (text: string) => void
   /** Stop the active goal run, if any. */
   stopGoal?: () => void

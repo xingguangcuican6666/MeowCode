@@ -22,7 +22,7 @@ export function skillDirs(cwd = process.cwd()): string[] {
   const dirs: string[] = []
   const entry = activeEntry()
   if (entry) dirs.push(path.join(entry.dir, 'skills'))
-  dirs.push(path.join(os.homedir(), '.anycode', 'skills'), path.join(cwd, '.anycode', 'skills'))
+  dirs.push(path.join(os.homedir(), '.meowcode', 'skills'), path.join(cwd, '.meowcode', 'skills'))
   return dirs
 }
 

@@ -6,8 +6,8 @@
 // the run through its exit code and (optionally) a JSON object on stdout.
 //
 // Configuration lives under the `hooks` key of settings.json — user-global
-// (~/.anycode/settings.json via AppConfig) merged with project-local
-// (<cwd>/.anycode/settings.json). Shape mirrors Claude Code:
+// (~/.meowcode/settings.json via AppConfig) merged with project-local
+// (<cwd>/.meowcode/settings.json). Shape mirrors Claude Code:
 //   "hooks": { "PreToolUse": [ { "matcher": "bash", "hooks": [ { "type": "command", "command": "...", "timeout": 30 } ] } ] }
 //
 // Exit-code protocol (per hook process):
@@ -39,7 +39,7 @@ export interface HookMatcher {
 }
 export type HooksConfig = Partial<Record<HookEvent, HookMatcher[]>>
 
-// Merge user-global (settings.json) with project-local (.anycode/settings.json),
+// Merge user-global (settings.json) with project-local (.meowcode/settings.json),
 // concatenating matcher lists per event so both fire (project after user).
 export function loadHooks(cwd = process.cwd()): HooksConfig {
   const merged: HooksConfig = {}
@@ -58,8 +58,8 @@ export function loadHooks(cwd = process.cwd()): HooksConfig {
   add(cfg.hooks)
   // Project-local settings.json (only its `hooks` key is consulted here).
   try {
-    const p = path.join(cwd, '.anycode', 'settings.json')
-    if (p !== path.join(os.homedir(), '.anycode', 'settings.json')) {
+    const p = path.join(cwd, '.meowcode', 'settings.json')
+    if (p !== path.join(os.homedir(), '.meowcode', 'settings.json')) {
       const j = JSON.parse(fs.readFileSync(p, 'utf8')) as { hooks?: HooksConfig }
       add(j.hooks)
     }

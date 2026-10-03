@@ -5,7 +5,7 @@ import { loadCredentials } from '../lib/credentials'
 import { resolveNewapiBase } from '../lib/newapi'
 import { resolveRelayToken, refreshRelayToken } from '../lib/oauth'
 
-// The default AnyCode vendor — the price source + backend the user intends to
+// The default MeowCode vendor — the price source + backend the user intends to
 // run later. STUBBED for now (per "我会作为供应商，但现在先不接入"): it calls nothing and
 // just explains itself. Cost accounting elsewhere still uses official rates
 // (see lib/pricing), so the price source is likewise a stub until wired.
@@ -21,7 +21,7 @@ const defaultProvider: Provider = {
 }
 
 // The logged-in `newapi` provider (see /login, /logout). Endpoint + bearer token
-// resolve fresh from ~/.anycode/credentials.json on every call, so /login and
+// resolve fresh from ~/.meowcode/credentials.json on every call, so /login and
 // /logout take effect immediately without a restart. Talks to new-api's
 // Anthropic-compatible /v1/messages with `Authorization: Bearer <token>`, where
 // the token is either an OAuth `at_` access token (auto-refreshed when it expires;

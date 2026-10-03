@@ -13,7 +13,7 @@ import { clip } from './util'
 
 // Named sub-agent roles → a system-prompt hint. Kept small; the concrete
 // toolset a sub-agent gets is decided by the agent loop, not here. Custom roles
-// defined under .anycode/agents/*.md (see lib/agents) extend this set at runtime.
+// defined under .meowcode/agents/*.md (see lib/agents) extend this set at runtime.
 const SUBAGENT_ROLES: Record<string, string> = {
   general: 'You are a focused sub-agent. Complete the assigned task end-to-end using your tools, then report the result concisely.',
   explore: 'You are a read-only exploration sub-agent. Investigate the codebase with read_file/grep/glob/list_dir (do not modify files) and report precise findings with file:line references.',
@@ -93,7 +93,7 @@ function spawnHint(kind: unknown, cwd?: string): string | undefined {
   const key = String(kind ?? 'general').toLowerCase()
   const builtin = SUBAGENT_ROLES[key]
   if (builtin) return builtin + REPORT_RULE
-  // Not a built-in role — try a custom agent defined under .anycode/agents.
+  // Not a built-in role — try a custom agent defined under .meowcode/agents.
   const custom = findAgent(key, cwd ?? process.cwd())
   if (custom) return custom.prompt + REPORT_RULE
   return SUBAGENT_ROLES.general + REPORT_RULE
@@ -134,7 +134,7 @@ async function runAgentBatch(
     save: async (): Promise<string> => {
       // `artifacts` setting off → refuse to write a standalone report file.
       if (ctx.artifacts === false) return '(artifacts 已在 /config 中关闭，未保存报告)'
-      const file = path.join(ctx.cwd, '.anycode', 'workflows', `${wfId}.md`)
+      const file = path.join(ctx.cwd, '.meowcode', 'workflows', `${wfId}.md`)
       await fsp.mkdir(path.dirname(file), { recursive: true })
       await fsp.writeFile(file, renderWorkflowReport(title, agents, texts), 'utf8')
       return file

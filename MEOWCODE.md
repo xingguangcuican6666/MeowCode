@@ -7,9 +7,10 @@ working in **MeowCode itself**, so most of the "what is this" detail that lives 
 
 ## What this project is
 
-MeowCode is a Claude-Code-style agentic coding CLI. The name has drifted: `git` and
-the npm package say `meowcode`, but much of the code and user-facing text still say
-"AnyCode" (it began as a Claude Code clone). Both refer to the same product.
+MeowCode is a Claude-Code-style agentic coding CLI. The npm package, the `git`
+command and the user-facing text all say "MeowCode"; the `~/.meowcode/` config
+directory is the only trace of the original "AnyCode" name it was cloned from,
+and `lib/legacyDir.ts` handles migrating users off it.
 
 Notable: **the agent loop is self-hosted**. There is no SDK — the `anthropic`
 provider speaks the Messages API over raw `fetch`/SSE, and the entire toolset
@@ -39,29 +40,35 @@ npm run start       # node dist/cli.js
   `bun run typecheck` + `bun run lint` + `bun run test` + `bun run build`. The
   repo is `"type": "module"` (ESM, `ESNext`/`Bundler` resolution); imported
   local modules use extensionless paths.
-- `.gitignore` excludes `dist/`, `node_modules/`, and `.anycode/` (the user's
-  config/sessions/memory live in `~/.anycode`, **not** in the repo).
+- `.gitignore` excludes `dist/`, `node_modules/`, and `.meowcode/` (the user's
+  config/sessions/memory live in `~/.meowcode`, **not** in the repo).
 
 ## Runtime notes
 
 - Default model is `claude-opus-4-8` (`src/config.ts`); provider defaults to
   `mock` unless `ANTHROPIC_API_KEY` is set.
-- Config, sessions, and cross-session memory persist to `~/.anycode/`:
+- Config, sessions, and cross-session memory persist to `~/.meowcode/`:
   `settings.json`, `sessions/`, `memory/` (`MEMORY.md` index), `credentials.json`,
   `history.json`. API keys are **never** written to disk — always env-sourced.
+- The pre-rename `~/.anycode/` is dead: `src/lib/legacyDir.ts` detects it at
+  startup (before config is read, before Ink mounts) and offers an **additive**
+  merge into `~/.meowcode` — nothing is ever deleted from the old dir, existing
+  destination files are never clobbered, and a marker file stops the nagging.
+  Skipped silently once `~/.meowcode` holds any state; non-TTY runs print a
+  one-line `mv` hint instead of prompting.
 - UI language is i18n'd (zh/en/auto) — see `src/lib/i18n.ts`; the codebase has
   substantial Chinese comments and some Chinese UI strings.
 
 ### Entries (profiles)
 
 `src/lib/entries.ts` — dsh-style profiles: self-contained dirs under
-`~/.anycode/entries/<name>/`.
+`~/.meowcode/entries/<name>/`.
 
 - Per entry: `entry.json` (manifest + overrides), `settings.json` (config saved
   while active), state (`sessions/ memory/ projects/ mailbox/ history.json`),
   content (`skills/ commands/ agents/`).
 - Chosen once at CLI startup: `--entry <name>` → `meowcode <name>` shorthand →
-  default in `~/.anycode/entry.json` (`{ "default": name }`). **No hot-switch** —
+  default in `~/.meowcode/entry.json` (`{ "default": name }`). **No hot-switch** —
   restart to change entries; in-session `/entry` only lists/sets the default.
 - Config layering (low → high): defaults → global `settings.json` → entry
   `settings.json` → `entry.json` overrides (`applyEntryOverrides`, called from
@@ -96,7 +103,7 @@ src/
   app.tsx + app-helpers.ts   session snapshot, goal/loop state, foldContext wiring
   types.ts              core contracts: Message, MessageMeta, StreamOpts, Provider,
                         AgentEvent, ToolResultBlock, SlashCommand, CommandContext, etc.
-  config.ts             ~/.anycode/settings.json load/save
+  config.ts             ~/.meowcode/settings.json load/save
   theme.ts              color themes + useTheme()/ThemeProvider
   hooks/useChat.ts      conversation state machine + streaming (foldContext/compact)
   components/           Ink components; PromptInput (~715), SettingsPanel (~590), etc.

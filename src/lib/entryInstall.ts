@@ -2,9 +2,11 @@
 // <name>`. Specs mirror dsh's `plugin add`: an npm package (`pkg`, `pkg@1.2.3`,
 // `@scope/pkg`), a git URL (`https://github.com/user/repo[.git]` or a
 // `user/repo` shorthand), or a local directory (`./path` / absolute). The
-// template comes from the source's package.json — "meowcode"."entry", with
-// "anycode"."entry" accepted for back-compat — or, failing that, a repo-root
-// entry.json. The entry NAME is the template's own "name" field, else the
+// template comes from the source's package.json — "meowcode"."entry" — or,
+// failing that, a repo-root entry.json. (An "anycode"."entry" alias used to be
+// accepted here; it is gone along with the rest of the pre-rename surface, so
+// republish templates under "meowcode".) The entry NAME is the template's own
+// "name" field, else the
 // package name (scope stripped, @scope/foo → foo), else the spec-derived name
 // (git repo name / bare npm spec / dir basename). Install = createEntry()
 // (which never overwrites) plus a never-overwrite copy of any shipped skills/
@@ -89,12 +91,12 @@ function readJson(file: string): Record<string, unknown> | null {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown> } catch { return null }
 }
 
-// package.json's "meowcode"."entry" ("anycode"."entry" accepted for
-// back-compat), else a repo-root entry.json used as the template itself.
+// package.json's "meowcode"."entry", else a repo-root entry.json used as the
+// template itself.
 function manifestFrom(root: string): Manifest | null {
   const pkg = readJson(path.join(root, 'package.json'))
   if (pkg) {
-    const brand = pkg.meowcode ?? pkg.anycode
+    const brand = pkg.meowcode
     if (brand && typeof brand === 'object') {
       const t = (brand as Record<string, unknown>).entry
       if (t && typeof t === 'object') {
@@ -116,7 +118,7 @@ interface ResolvedSource { name: string; template: RawTemplate; contentRoot: str
 function fromRoot(root: string, what: string, fallbackName: string): ResolvedSource {
   const mf = manifestFrom(root)
   if (!mf) {
-    fail(`${what}: no "meowcode"."entry" (or "anycode"."entry") field in package.json and no entry.json at its root`)
+    fail(`${what}: no "meowcode"."entry" field in package.json and no entry.json at its root`)
   }
   const name = (typeof mf.template.name === 'string' && mf.template.name) || stripScope(mf.pkgName ?? '') || stripScope(fallbackName)
   if (!isValidEntryName(name)) fail(`"${name}" is not a valid entry name (${what})`)
@@ -240,7 +242,7 @@ export function removeEntry(name: string, opts?: InstallOptions): string {
   const force = !!opts?.force
   if (!isValidEntryName(name)) fail(`"${name}" is not a valid entry name`)
   const dir = entryDir(name)
-  if (!entryExists(name)) fail(`no entry named "${name}" in ~/.anycode/entries`)
+  if (!entryExists(name)) fail(`no entry named "${name}" in ~/.meowcode/entries`)
   if (!force) {
     for (const kind of ['sessions', 'memory'] as const) {
       let hasData = false

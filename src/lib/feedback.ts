@@ -1,6 +1,6 @@
 // Local feedback capture for the `/feedback` command and the `draftedFeedback`
 // setting. MeowCode has no feedback backend, so we persist each report as a small
-// Markdown file under ~/.anycode/feedback/ (the honest local analogue of Claude
+// Markdown file under ~/.meowcode/feedback/ (the honest local analogue of Claude
 // Code's "report feedback"). `draftedFeedback` decides whether a bare `/feedback`
 // asks the model to DRAFT a report for you first (see the command), versus just
 // prompting you to type one.
@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
-export const FEEDBACK_DIR = path.join(os.homedir(), '.anycode', 'feedback')
+export const FEEDBACK_DIR = path.join(os.homedir(), '.meowcode', 'feedback')
 
 export interface SavedFeedback { file: string }
 

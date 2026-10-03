@@ -9,4 +9,4 @@
 import os from 'node:os'
 import path from 'node:path'
 
-export const CONFIG_DIR = path.join(os.homedir(), '.anycode')
+export const CONFIG_DIR = path.join(os.homedir(), '.meowcode')

@@ -6,7 +6,7 @@
 // ToolDef named `mcp__<server>__<tool>` whose `run` proxies to `tools/call`.
 //
 // Servers are configured under the `mcpServers` key of settings.json (user-global
-// via AppConfig) merged with a project-local .anycode/settings.json, mirroring
+// via AppConfig) merged with a project-local .meowcode/settings.json, mirroring
 // Claude Code's shape:
 //   "mcpServers": { "fs": { "command": "npx", "args": ["-y","@modelcontextprotocol/server-filesystem","/tmp"] } }
 //
@@ -126,7 +126,7 @@ function onStdout(srv: McpServer, chunk: Buffer): void {
 // ---- config loading ----------------------------------------------------------
 
 // Merge the user-global `mcpServers` (settings.json via AppConfig) with a
-// project-local .anycode/settings.json; the project entry wins on name clash.
+// project-local .meowcode/settings.json; the project entry wins on name clash.
 export function loadMcpServers(cwd = process.cwd()): McpServers {
   const out: McpServers = {}
   try {
@@ -134,7 +134,7 @@ export function loadMcpServers(cwd = process.cwd()): McpServers {
     if (user && typeof user === 'object') Object.assign(out, user)
   } catch {}
   try {
-    const p = path.join(cwd, '.anycode', 'settings.json')
+    const p = path.join(cwd, '.meowcode', 'settings.json')
     if (fs.existsSync(p)) {
       const proj = JSON.parse(fs.readFileSync(p, 'utf8'))?.mcpServers as McpServers | undefined
       if (proj && typeof proj === 'object') Object.assign(out, proj)

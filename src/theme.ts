@@ -1,5 +1,5 @@
 /**
- * Visual themes for AnyCode. A *theme* is a named color palette; `symbols` are
+ * Visual themes for MeowCode. A *theme* is a named color palette; `symbols` are
  * shared across all themes. Colors are hex strings (Ink renders truecolor via
  * chalk) EXCEPT the `*-ansi` themes, which use the 16 named ANSI colors so they
  * render correctly on terminals without truecolor support.

@@ -4,7 +4,7 @@
 //
 // STUB SOURCE (by design): the rate table below is a hardcoded snapshot of
 // Anthropic's public list prices. The real "price source" — and the default
-// AnyCode vendor those prices would come from — are intentionally NOT wired yet
+// MeowCode vendor those prices would come from — are intentionally NOT wired yet
 // (see providers/index.ts `defaultProvider`). Per the product decision, a custom
 // Anthropic-protocol provider is billed at these OFFICIAL rates too, matched to a
 // model by id substring. Swap PRICE_SOURCE + TABLE for a live source later.

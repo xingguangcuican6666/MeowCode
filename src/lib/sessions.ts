@@ -2,7 +2,7 @@
 // config, goal, loop and usage survive quitting MeowCode and can be reopened with
 // /resume (or `meowcode --continue`). This is the entire conversation — distinct
 // from lib/history.ts, which only stores the ↑/↓ input recall. Each session is one
-// JSON file under the active sessions dir (~/.anycode/sessions/, or the entry's own
+// JSON file under the active sessions dir (~/.meowcode/sessions/, or the entry's own
 // sessions/ when an entry is active — see lib/entries.ts); the newest-first list
 // drives the /resume picker.
 //
@@ -18,7 +18,7 @@ import { summarizeTitle } from './summarize'
 import type { SessionSnapshot } from '../app'
 
 // The sessions dir, resolved at CALL time so it follows the active entry (set at
-// startup before any session I/O). In global mode this is ~/.anycode/sessions,
+// startup before any session I/O). In global mode this is ~/.meowcode/sessions,
 // byte-for-byte the legacy path.
 function sessionsDir(): string {
   return stateDir('sessions')

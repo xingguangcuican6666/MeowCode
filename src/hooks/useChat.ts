@@ -441,7 +441,7 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
     // Project-root instruction files (MEOWCODE.md/CLAUDE.md/AGENTS.md) auto-loaded
     // into the system prompt, like real Claude Code — folded in next to memory.
     const projInstr = projectInstructionsPreamble(process.cwd())
-    // Custom sub-agent types (.anycode/agents/*.md): tell the model which named
+    // Custom sub-agent types (.meowcode/agents/*.md): tell the model which named
     // agents it can pass as `subagent_type` to task/workflow, and what each is for.
     const agentCatalog = customAgentCatalog(process.cwd())
     const agentsPreamble = agentCatalog

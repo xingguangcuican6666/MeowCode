@@ -1,14 +1,14 @@
 // Entries — dsh-style profiles for meowcode. An "entry" is a self-contained
-// profile directory under ~/.anycode/entries/<name>/ holding its own config
+// profile directory under ~/.meowcode/entries/<name>/ holding its own config
 // overrides (entry.json), persisted full config (settings.json — written by
 // saveConfig while the entry is active), per-entry state (sessions/, memory/,
 // projects/, history.json, mailbox/) and content dirs (skills/, commands/,
-// agents/). ~/.anycode/entry.json names the default entry activated at startup
+// agents/). ~/.meowcode/entry.json names the default entry activated at startup
 // (overridable with --entry <name>); when absent, meowcode behaves exactly as
 // before ("global mode").
 //
 // Config layering (lowest → highest precedence):
-//   hardcoded defaults → global ~/.anycode/settings.json → entry settings.json
+//   hardcoded defaults → global ~/.meowcode/settings.json → entry settings.json
 //   → entry.json overrides. The settings bag merges key-by-key at each layer.
 // Resources resolve entry → global → project (handled by the owning modules via
 // the path helpers below). The API key is always env-sourced and never read

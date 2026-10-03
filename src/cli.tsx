@@ -25,6 +25,9 @@ import {
   listEntries, setDefaultEntry, activeEntryName,
 } from './lib/entries'
 import { readLauncherConfig, runLauncher } from './lib/launcher'
+// The AnyCode→MeowCode rename migration (one-time prompt at startup, see
+// lib/legacyDir.ts for why it must run before config is read).
+import { offerLegacyMigration } from './lib/legacyDir'
 
 const argv = process.argv.slice(2)
 
@@ -317,6 +320,13 @@ function runEntryCommand(args: string[]): void {
 async function main(): Promise<void> {
   if (has('-h', '--help')) { printHelp(); return }
   if (has('-v', '--version')) { process.stdout.write(VERSION + '\n'); return }
+
+  // Legacy config-dir migration: this build reads ~/.meowcode only, so a user
+  // upgrading from the AnyCode era would silently start with an empty history.
+  // Ask (and merge, additively) BEFORE anything reads config — and before Ink
+  // mounts, since that is the only point raw-mode stdin is safely ours. No-op
+  // when there is no old dir or the new one already has state.
+  await offerLegacyMigration()
 
   // Entry (profile) resolution, before anything config-touching: an explicit
   // --entry wins; else the persisted default; else global mode. A positional

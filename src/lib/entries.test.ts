@@ -18,13 +18,13 @@ const { TMP, saveConfigSpy } = vi.hoisted(() => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'meowcode-entries-'))
   return {
     TMP: home,
-    CONFIG_DIR: path.join(home, '.anycode'),
+    CONFIG_DIR: path.join(home, '.meowcode'),
     saveConfigSpy: vi.fn(),
   }
 })
 // entries.ts takes CONFIG_DIR from ./configDir, which computes it from
 // os.homedir() at import time — mocking ../config's CONFIG_DIR would never
-// reach it (and the tests would read the real ~/.anycode). Mock homedir
+// reach it (and the tests would read the real ~/.meowcode). Mock homedir
 // instead so every derived path lands inside TMP.
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>()

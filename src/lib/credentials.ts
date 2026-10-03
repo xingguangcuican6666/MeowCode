@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 
-export const CREDENTIALS_FILE = path.join(os.homedir(), '.anycode', 'credentials.json')
+export const CREDENTIALS_FILE = path.join(os.homedir(), '.meowcode', 'credentials.json')
 
 // The panel login session — present only for password logins, so /logout can
 // revoke it server-side (POST /api/user/auth/logout). Absent for a pasted key.

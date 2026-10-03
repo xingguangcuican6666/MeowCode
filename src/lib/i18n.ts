@@ -6,7 +6,7 @@
  * (`getLang`/`setLang`) lets non-React code (commands, lib helpers) translate too.
  * No external dependency — the catalog is a plain object of `{ zh, en }` pairs and
  * `t()` does simple `{name}` interpolation, matching the project's dependency-light
- * style. See [[anycode-project]].
+ * style.
  *
  * The active language comes from the `language` setting (auto | zh | en); `auto`
  * resolves from the shell locale (LANG/LC_ALL). app.tsx wires the provider and
@@ -183,7 +183,7 @@ export const messages = {
   'login.errKeyRequired': { zh: '请粘贴中转密钥', en: 'Please paste the relay key' },
   'login.errUsernameRequired': { zh: '请填写用户名', en: 'Please enter a username' },
   'login.title': { zh: '登录 MeowArch API', en: 'Log in to MeowArch API' },
-  'login.subtitle': { zh: '凭据只写入 ~/.anycode/credentials.json（0600），不会出现在对话记录里', en: 'Credentials are written only to ~/.anycode/credentials.json (0600), never shown in the conversation log' },
+  'login.subtitle': { zh: '凭据只写入 ~/.meowcode/credentials.json（0600），不会出现在对话记录里', en: 'Credentials are written only to ~/.meowcode/credentials.json (0600), never shown in the conversation log' },
   'login.fieldBase': { zh: '面板地址', en: 'Panel URL' },
   'login.methodLabel': { zh: '登录方式', en: 'Login method' },
   'login.methodOAuth': { zh: '1. 浏览器登录 (OAuth · 推荐)', en: '1. Browser login (OAuth · recommended)' },
@@ -283,10 +283,10 @@ export const messages = {
   'cmd.vimDesc': { zh: '切换输入框的 vim 键位（editorMode）—— 无参在 vim↔normal 间切换，或指定 normal|vim|emacs|off', en: 'Toggle vim key bindings for the prompt (editorMode) — bare toggles vim↔normal, or pass normal|vim|emacs|off' },
   'cmd.vimUnknown': { zh: '未知的编辑模式 `{mode}`。可选：normal、vim、emacs、off。', en: 'Unknown editor mode `{mode}`. Choose: normal, vim, emacs, off.' },
   'cmd.vimSet': { zh: '输入框编辑模式已设为 `{mode}`。', en: 'Prompt editor mode set to `{mode}`.' },
-  'cmd.agentsDesc': { zh: '列出可用的子代理类型 —— 内置角色与 .anycode/agents/*.md 自定义代理', en: 'List available sub-agent types — built-in roles and custom .anycode/agents/*.md agents' },
+  'cmd.agentsDesc': { zh: '列出可用的子代理类型 —— 内置角色与 .meowcode/agents/*.md 自定义代理', en: 'List available sub-agent types — built-in roles and custom .meowcode/agents/*.md agents' },
   'cmd.agentsBuiltinHeader': { zh: '内置子代理角色：', en: 'Built-in sub-agent roles:' },
-  'cmd.agentsCustomHeader': { zh: '自定义子代理（.anycode/agents/*.md）：', en: 'Custom sub-agents (.anycode/agents/*.md):' },
-  'cmd.agentsCustomNone': { zh: '尚无自定义子代理。在 `.anycode/agents/` 下建一个带 front-matter（name/description）的 .md 文件即可定义。', en: 'No custom sub-agents yet. Define one by adding a .md file with front-matter (name/description) under `.anycode/agents/`.' },
+  'cmd.agentsCustomHeader': { zh: '自定义子代理（.meowcode/agents/*.md）：', en: 'Custom sub-agents (.meowcode/agents/*.md):' },
+  'cmd.agentsCustomNone': { zh: '尚无自定义子代理。在 `.meowcode/agents/` 下建一个带 front-matter（name/description）的 .md 文件即可定义。', en: 'No custom sub-agents yet. Define one by adding a .md file with front-matter (name/description) under `.meowcode/agents/`.' },
   'cmd.agentsHint': { zh: '在 task / plan / workflow 的 `subagent_type` 里按名字选用。', en: 'Reference one by name in a task / plan / workflow `subagent_type`.' },
   'cmd.effortSetUltra': { zh: '已切换到 `ultracode`（xhigh + 工作流编排）。', en: 'Switched to `ultracode` (xhigh + workflow orchestration).' },
   'cmd.effortSetUltraSession': { zh: '已切换到 `ultracode`（xhigh + 工作流编排；仅本次会话）。', en: 'Switched to `ultracode` (xhigh + workflows; this session only).' },
@@ -390,7 +390,7 @@ export const messages = {
   'cmd.autocompactInvalid': { zh: '无效值 `{value}` —— 请用 auto、off，或一个 token 数（如 128000、128k）。', en: 'Invalid value `{value}` — use auto, off, or a token count (e.g. 128000, 128k).' },
   'cmd.tuiOnly': { zh: '`{cmd}` 仅在交互式 TUI 中可用。', en: '`{cmd}` is only available in the interactive TUI.' },
   'cmd.skillDesc': { zh: '列出技能或运行某个技能 —— /skill、/skill <name> [args]', en: 'List skills or run one — /skill, /skill <name> [args]' },
-  'cmd.skillNone': { zh: '未找到技能。可在 `~/.anycode/skills/<name>/SKILL.md` 或 `./.anycode/skills/<name>/SKILL.md` 添加。', en: 'No skills found. Add one at `~/.anycode/skills/<name>/SKILL.md` or `./.anycode/skills/<name>/SKILL.md`.' },
+  'cmd.skillNone': { zh: '未找到技能。可在 `~/.meowcode/skills/<name>/SKILL.md` 或 `./.meowcode/skills/<name>/SKILL.md` 添加。', en: 'No skills found. Add one at `~/.meowcode/skills/<name>/SKILL.md` or `./.meowcode/skills/<name>/SKILL.md`.' },
   'cmd.skillTitle': { zh: '**技能**', en: '**Skills**' },
   'cmd.skillRunHint': { zh: '用 `/skill <name> [args]` 运行某个技能。', en: 'Run one with `/skill <name> [args]`.' },
   'cmd.skillUnknown': { zh: '未知技能 `{name}`。输入 `/skill` 查看列表。', en: 'Unknown skill `{name}`. Type `/skill` to list.' },
@@ -418,7 +418,7 @@ export const messages = {
   'cmd.editorFailed': { zh: '无法启动编辑器。请设置 $EDITOR 或 $VISUAL。', en: 'Could not launch an editor. Set $EDITOR or $VISUAL.' },
   // /feedback (draftedFeedback)
   'cmd.feedbackDesc': { zh: '记录一条反馈 —— /feedback <内容>', en: 'Capture feedback — /feedback <text>' },
-  'cmd.feedbackUsage': { zh: '用法：`/feedback <内容>` —— 反馈会保存到 ~/.anycode/feedback/。', en: 'Usage: `/feedback <text>` — saved under ~/.anycode/feedback/.' },
+  'cmd.feedbackUsage': { zh: '用法：`/feedback <内容>` —— 反馈会保存到 ~/.meowcode/feedback/。', en: 'Usage: `/feedback <text>` — saved under ~/.meowcode/feedback/.' },
   'cmd.feedbackDrafting': { zh: '正在为你起草反馈，稍后确认后用 `/feedback <内容>` 保存。', en: 'Drafting feedback for you to review; save it with `/feedback <text>`.' },
   'cmd.feedbackSaved': { zh: '反馈已保存到 `{file}`（共 {count} 条）。', en: 'Feedback saved to `{file}` ({count} total).' },
   // /rewind (rewindCode)
@@ -485,10 +485,10 @@ export const messages = {
   'cmd.initNonInteractive': { zh: '仅在交互式会话中可用——请运行 `meowcode` 后再使用 /init。', en: 'Only available in an interactive session — run `meowcode`, then use /init.' },
   'hooks.promptBlocked': { zh: 'UserPromptSubmit 钩子拦截了本次输入：{reason}', en: 'A UserPromptSubmit hook blocked this prompt: {reason}' },
   'cmd.hooksDesc': { zh: '查看已配置的生命周期钩子（PreToolUse/PostToolUse 等）', en: 'Show configured lifecycle hooks (PreToolUse/PostToolUse, etc.)' },
-  'cmd.hooksNone': { zh: '未配置任何钩子。可在 ~/.anycode/settings.json 或项目 .anycode/settings.json 的 "hooks" 键下添加（事件：PreToolUse、PostToolUse、UserPromptSubmit、SessionStart、Stop、Notification）。', en: 'No hooks configured. Add them under the "hooks" key of ~/.anycode/settings.json or a project .anycode/settings.json (events: PreToolUse, PostToolUse, UserPromptSubmit, SessionStart, Stop, Notification).' },
+  'cmd.hooksNone': { zh: '未配置任何钩子。可在 ~/.meowcode/settings.json 或项目 .meowcode/settings.json 的 "hooks" 键下添加（事件：PreToolUse、PostToolUse、UserPromptSubmit、SessionStart、Stop、Notification）。', en: 'No hooks configured. Add them under the "hooks" key of ~/.meowcode/settings.json or a project .meowcode/settings.json (events: PreToolUse, PostToolUse, UserPromptSubmit, SessionStart, Stop, Notification).' },
   'cmd.hooksHeader': { zh: '已配置的钩子：', en: 'Configured hooks:' },
   'cmd.mcpDesc': { zh: '查看已配置的 MCP 服务器及其发现的工具', en: 'Show configured MCP servers and their discovered tools' },
-  'cmd.mcpNone': { zh: '未配置任何 MCP 服务器。可在 ~/.anycode/settings.json 或项目 .anycode/settings.json 的 "mcpServers" 键下添加，例如：{ "fs": { "command": "npx", "args": ["-y","@modelcontextprotocol/server-filesystem","/tmp"] } }。', en: 'No MCP servers configured. Add them under the "mcpServers" key of ~/.anycode/settings.json or a project .anycode/settings.json, e.g. { "fs": { "command": "npx", "args": ["-y","@modelcontextprotocol/server-filesystem","/tmp"] } }.' },
+  'cmd.mcpNone': { zh: '未配置任何 MCP 服务器。可在 ~/.meowcode/settings.json 或项目 .meowcode/settings.json 的 "mcpServers" 键下添加，例如：{ "fs": { "command": "npx", "args": ["-y","@modelcontextprotocol/server-filesystem","/tmp"] } }。', en: 'No MCP servers configured. Add them under the "mcpServers" key of ~/.meowcode/settings.json or a project .meowcode/settings.json, e.g. { "fs": { "command": "npx", "args": ["-y","@modelcontextprotocol/server-filesystem","/tmp"] } }.' },
   'cmd.mcpHeader': { zh: 'MCP 服务器：', en: 'MCP servers:' },
   'cmd.mcpTools': { zh: '{n} 个工具', en: '{n} tool(s)' },
   'cmd.mcpReady': { zh: '就绪', en: 'ready' },

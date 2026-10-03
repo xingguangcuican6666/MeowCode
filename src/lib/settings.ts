@@ -1,4 +1,4 @@
-// Settings schema for /config. AnyCode mirrors Claude Code's Config tab: a broad
+// Settings schema for /config. MeowCode mirrors Claude Code's Config tab: a broad
 // surface of toggles, enums, and values. Rather than a field-per-setting on
 // AppConfig plus a giant switch, we describe every setting once here — its type,
 // default, allowed values, and label — and drive the whole /config command

@@ -79,7 +79,7 @@ function makeMockWorkflow(gi: number, names: string[], opts: StreamOpts, cwd: st
     pause: (): void => { if (!paused) { paused = true; emit() } },
     resume: (): void => { if (paused) { paused = false; wake(); emit() } },
     save: async (): Promise<string> => {
-      const file = path.join(cwd, '.anycode', 'workflows', `${id}.md`)
+      const file = path.join(cwd, '.meowcode', 'workflows', `${id}.md`)
       await fsp.mkdir(path.dirname(file), { recursive: true })
       await fsp.writeFile(file, renderWorkflowReport(title, agents, texts), 'utf8')
       return file

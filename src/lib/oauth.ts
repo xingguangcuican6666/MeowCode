@@ -31,7 +31,7 @@ export function redirectUriFor(port: number): string {
   return `http://127.0.0.1:${port}/callback`
 }
 
-// The registered public client id for AnyCode's OAuth app on the user's new-api
+// The registered public client id for MeowCode's OAuth app on the user's new-api
 // instance. NOT a secret — a public client (PKCE, no client_secret) is identified
 // by client_id alone, so it's safe to ship in source. Overridable via env /
 // settings / a remembered login (see resolveOAuthClientId).

@@ -3,4 +3,5 @@ dist/
 dist-bin/
 *.log
 .DS_Store
+.meowcode/
 .anycode/

@@ -13,7 +13,7 @@ import fs from 'node:fs'
 import { stateFile } from './entries'
 
 // The history file, resolved at CALL time so it follows the active entry:
-// ~/.anycode/history.json in global mode (the legacy path), or the entry's own
+// ~/.meowcode/history.json in global mode (the legacy path), or the entry's own
 // history.json when one is active.
 function historyFile(): string {
   return stateFile('history')

@@ -24,7 +24,7 @@ export const skillTool: ToolDef = {
   description:
     'Invoke a reusable project/user skill — a saved playbook of instructions for a recurring task (deploy steps, a review checklist, a repo-specific workflow). ' +
     'Call with a `name` to load that skill\'s full instructions (its body, with any $ARGUMENTS/$1..$9 placeholders filled from `args`) into your context; then follow them as part of the current turn. ' +
-    'Call with NO `name` to list the available skills first. Skills live in `~/.anycode/skills/<name>/SKILL.md` (user-global) and `./.anycode/skills/<name>/SKILL.md` (project, wins on name clash). ' +
+    'Call with NO `name` to list the available skills first. Skills live in `~/.meowcode/skills/<name>/SKILL.md` (user-global) and `./.meowcode/skills/<name>/SKILL.md` (project, wins on name clash). ' +
     'Prefer a matching skill over improvising when the task is one a skill covers.',
   input_schema: {
     type: 'object',
@@ -39,7 +39,7 @@ export const skillTool: ToolDef = {
     const name = typeof input.name === 'string' ? input.name.trim().toLowerCase() : ''
     if (!name) {
       if (!skills.length) {
-        return { content: 'No skills available. Add one at `~/.anycode/skills/<name>/SKILL.md` or `./.anycode/skills/<name>/SKILL.md`.' }
+        return { content: 'No skills available. Add one at `~/.meowcode/skills/<name>/SKILL.md` or `./.meowcode/skills/<name>/SKILL.md`.' }
       }
       const list = catalog(cwd)
       return { content: `Available skills:\n${list}\n\nCall this tool again with a \`name\` to load one.`, display: `${skills.length} skill${skills.length === 1 ? '' : 's'}` }

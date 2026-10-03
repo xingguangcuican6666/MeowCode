@@ -40,10 +40,28 @@ echo "write a haiku about tps reports" | meowcode
 
 `/help` · `/model <id>` · `/provider <mock|anthropic>` · `/config` · `/entry` · `/clear` · `/version` · `/exit`
 
+## Config location
+
+All user state lives in `~/.meowcode/` — `settings.json`, `sessions/`,
+`memory/`, `credentials.json`, `history.json`, and `entries/`.
+
+This tool was called **AnyCode** before; its config directory was `~/.anycode`.
+That directory is no longer read. On the next interactive start, if `~/.anycode`
+still holds data and `~/.meowcode` is empty, MeowCode asks whether to merge it
+in. The merge is additive and never deletes the old directory, so you can check
+the result and remove `~/.anycode` yourself. To skip the prompt:
+
+```bash
+mv ~/.anycode ~/.meowcode     # or merge by hand
+```
+
+Non-interactive runs (print mode, pipes, CI) print a one-line notice with the
+same `mv` hint instead of prompting.
+
 ## Entries (profiles)
 
 Entries are dsh-style profiles: self-contained directories under
-`~/.anycode/entries/<name>/`, each with its own config, sessions, memory, and
+`~/.meowcode/entries/<name>/`, each with its own config, sessions, memory, and
 content. Switching entry switches all of them at once — handy for separating
 work / personal / experiments.
 
@@ -51,7 +69,7 @@ Quick start:
 
 ```bash
 meowcode entry new work    # create an entry (writes its entry.json manifest)
-meowcode entry use work    # make it the default (recorded in ~/.anycode/entry.json)
+meowcode entry use work    # make it the default (recorded in ~/.meowcode/entry.json)
 meowcode                   # start in the default entry
 meowcode work             # ...or start a specific entry directly
 meowcode --entry work     # same, as an explicit flag
@@ -66,7 +84,7 @@ Each entry dir holds:
   (`description`, `model`, `provider`, `theme`, `settings`, `hooks`,
   `mcpServers`, `permissions`, `customProviders`, `launcher`).
 - `settings.json` — the entry's saved config. Layering, low → high: built-in
-  defaults → global `~/.anycode/settings.json` → entry `settings.json` →
+  defaults → global `~/.meowcode/settings.json` → entry `settings.json` →
   entry `entry.json`.
 - `sessions/`, `memory/`, `projects/`, `mailbox/`, `history.json` — per-entry
   state; resource lookup goes entry → global → project.
@@ -191,7 +209,7 @@ src/
   app.tsx            Ink app: layout, global keys, elapsed timer
   theme.ts           colors + symbols
   types.ts           Message / Provider / Command contracts
-  config.ts          ~/.anycode/settings.json load/save
+  config.ts          ~/.meowcode/settings.json load/save
   hooks/useChat.ts   conversation state machine + streaming
   components/        Banner · Message · StatusLine · PromptInput
   commands/          slash-command registry

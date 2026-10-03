@@ -1,4 +1,4 @@
-// Lifetime usage stats, persisted to ~/.anycode/stats.json. This is what the
+// Lifetime usage stats, persisted to ~/.meowcode/stats.json. This is what the
 // Stats tab's heatmap + "all-time" numbers read from: per-day token/cost/turn
 // totals, per-model totals, session count, and the longest single session. Kept
 // dependency-free and fully defensive — a missing or corrupt file just yields an
@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 
-export const STATS_DIR = path.join(os.homedir(), '.anycode')
+export const STATS_DIR = path.join(os.homedir(), '.meowcode')
 export const STATS_FILE = path.join(STATS_DIR, 'stats.json')
 
 export interface DayStat {
