@@ -4,13 +4,21 @@ import fs from 'node:fs'
 import type { SlashCommand } from '../types'
 import { parseFrontmatter } from './frontmatter'
 import { expandArgs } from './skills'
+import { activeEntry } from './entries'
 
 // Custom slash commands, like Claude Code's project/user commands. Each is a
 // Markdown file whose name is the command name and whose body is a prompt
 // template ($ARGUMENTS / $1..$9). Running one sends the expanded body to the
 // model as a user turn.
+// Merge order: entry (when one is active) → user-global → project-local, with
+// later dirs overriding earlier ones on a name clash. No entry → the legacy two
+// dirs, byte-for-byte.
 export function commandDirs(cwd = process.cwd()): string[] {
-  return [path.join(os.homedir(), '.anycode', 'commands'), path.join(cwd, '.anycode', 'commands')]
+  const dirs: string[] = []
+  const entry = activeEntry()
+  if (entry) dirs.push(path.join(entry.dir, 'commands'))
+  dirs.push(path.join(os.homedir(), '.anycode', 'commands'), path.join(cwd, '.anycode', 'commands'))
+  return dirs
 }
 
 function readCommandDir(dir: string): SlashCommand[] {

@@ -2,20 +2,27 @@
 // config, goal, loop and usage survive quitting MeowCode and can be reopened with
 // /resume (or `meowcode --continue`). This is the entire conversation — distinct
 // from lib/history.ts, which only stores the ↑/↓ input recall. Each session is one
-// JSON file at ~/.anycode/sessions/<id>.json; the newest-first list drives the
-// /resume picker.
+// JSON file under the active sessions dir (~/.anycode/sessions/, or the entry's own
+// sessions/ when an entry is active — see lib/entries.ts); the newest-first list
+// drives the /resume picker.
 //
 // Everything here is best-effort and never throws: a missing/corrupt file just
 // means "that session is gone", and a failed write silently drops that one
 // autosave. The stored config never carries the API key (same rule as saveConfig).
 import path from 'node:path'
 import fs from 'node:fs'
-import { CONFIG_DIR, loadConfig } from '../config'
+import { loadConfig } from '../config'
+import { stateDir } from './entries'
 import { getSetting } from './settings'
 import { summarizeTitle } from './summarize'
 import type { SessionSnapshot } from '../app'
 
-export const SESSIONS_DIR = path.join(CONFIG_DIR, 'sessions')
+// The sessions dir, resolved at CALL time so it follows the active entry (set at
+// startup before any session I/O). In global mode this is ~/.anycode/sessions,
+// byte-for-byte the legacy path.
+function sessionsDir(): string {
+  return stateDir('sessions')
+}
 
 // Keep at most this many sessions PER WORKSPACE (cwd); the oldest in a workspace
 // fall off on save. Other workspaces' sessions are never touched — history is
@@ -45,7 +52,7 @@ export function newSessionId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-const fileFor = (id: string): string => path.join(SESSIONS_DIR, `${id}.json`)
+const fileFor = (id: string): string => path.join(sessionsDir(), `${id}.json`)
 
 // A short one-line title from the first real user message (commands/blank skipped).
 // Kept as the synchronous fallback when the model summarizer is unavailable.
@@ -79,7 +86,7 @@ function realCount(snap: SessionSnapshot): number {
 export function saveSession(id: string, snap: SessionSnapshot): void {
   try {
     if (realCount(snap) === 0) return
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true })
+    fs.mkdirSync(sessionsDir(), { recursive: true })
     const { apiKey: _omit, ...config } = snap.config
     void persistSession(id, snap, config as SessionSnapshot['config'])
   } catch {
@@ -153,7 +160,7 @@ function readFile(id: string): SavedSession | null {
 function allMetas(): SessionMeta[] {
   let names: string[] = []
   try {
-    names = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'))
+    names = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json'))
   } catch {
     return [] // directory not created yet — no sessions
   }

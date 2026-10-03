@@ -16,6 +16,15 @@ import { StringDecoder } from 'node:string_decoder'
 // The exact sequences (and the Terminal.app mouse gate) live in lib/termmodes so
 // the /editor bridge in app.tsx can leave and re-enter the same modes.
 import { ALT_ON, ALT_OFF, MOUSE_ON, MOUSE_OFF, CLEAR } from './lib/termmodes'
+// `meowcode entry install|remove` — dsh-style profile management. The heavy
+// lifting lives in lib/entryInstall; this wiring only parses --force, prints
+// the one-line result (or the error) and exits — nothing throws past main().
+import { EntryInstallError, entryInstallCommand } from './lib/entryInstall'
+import {
+  activateEntry, activeEntry, createEntry, entryDir, entryExists, getDefaultEntry,
+  listEntries, setDefaultEntry, activeEntryName,
+} from './lib/entries'
+import { readLauncherConfig, runLauncher } from './lib/launcher'
 
 const argv = process.argv.slice(2)
 
@@ -49,6 +58,7 @@ Usage:
   meowcode                      Start an interactive session
   meowcode -p "<prompt>"        Print mode: one-shot, non-interactive
   echo "<prompt>" | meowcode    Same, reading the prompt from stdin
+  meowcode <entry>              Same as --entry <entry> (shorthand)
 
 Options:
   -p, --print <prompt>   Run a single prompt and stream the response to stdout
@@ -57,8 +67,18 @@ Options:
       --fork-session [id]  Open a copy of a saved session, leaving the original intact
       --model <id>       Model to use for this run
       --provider <id>    Provider to use (mock | anthropic)
+      --entry <name>      Use the named entry (profile) for this run
   -h, --help             Show this help
   -v, --version          Show the version
+
+Entries:
+  meowcode entry list                 List entries (marks default and active)
+  meowcode entry new <name>           Create an entry
+  meowcode entry use <name>           Set the default entry
+  meowcode entry default              Print the default entry
+  meowcode entry default off          Clear the default entry (global mode)
+  meowcode entry install <spec>       Install an entry from npm, git or ./dir (--force)
+  meowcode entry remove <name>        Remove an installed entry (--force)
 
 Environment:
   ANTHROPIC_API_KEY      When set, the real Anthropic API is used by default
@@ -234,15 +254,111 @@ async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSn
   process.exit(0)
 }
 
+// `meowcode entry ...` — non-interactive entry (profile) management. Runs and
+// exits before any interactive mount. Markers: ● on the default, ▶ on the
+// active entry of this process (only meaningful under `entry list` invoked
+// with --entry, kept for completeness).
+function runEntryCommand(args: string[]): void {
+  const sub = args[0] ?? 'list'
+  if (sub === 'list' || sub === 'ls') {
+    const entries = listEntries()
+    const def = getDefaultEntry()
+    if (entries.length === 0) { process.stdout.write('No entries yet (create one with `meowcode entry new <name>`).\n'); return }
+    for (const e of entries) {
+      const marks = [e.name === def ? '●' : null, e.name === activeEntryName() ? '▶' : null, e.hasLauncher ? '[launcher]' : null].filter(Boolean).join(' ')
+      const desc = e.description ? ` — ${e.description}` : ''
+      process.stdout.write(`${marks ? marks.padEnd(2) : ' '} ${e.name}${desc}\n`)
+    }
+    return
+  }
+  if (sub === 'new' || sub === 'create') {
+    const name = args[1]
+    if (!name) { process.stderr.write('Usage: meowcode entry new <name> [--description "..."]\n'); process.exit(1) }
+    const di = args.findIndex((a) => a === '--description' || a === '-d')
+    const description = di >= 0 && args[di + 1] && !args[di + 1].startsWith('-') ? args[di + 1] : undefined
+    try { createEntry(name, { description }) } catch (err) { process.stderr.write(`Error: ${String((err as Error)?.message ?? err)}\n`); process.exit(1) }
+    process.stdout.write(`Entry '${name}' created at ${entryDir(name)}\n`)
+    return
+  }
+  if (sub === 'use' || sub === 'default') {
+    // `meowcode entry default` prints the current default; `entry default off`
+    // (or `entry use off`) clears it back to global mode.
+    const target = args[1]
+    if (target === undefined) {
+      const def = getDefaultEntry()
+      process.stdout.write(def ? `${def}\n` : 'none\n')
+      return
+    }
+    if (target === 'off') { setDefaultEntry(null); process.stdout.write('Default entry cleared (global mode).\n'); return }
+    if (!entryExists(target)) {
+      process.stderr.write(`Error: entry '${target}' does not exist (see 'meowcode entry list').\n`)
+      process.exit(1)
+    }
+    setDefaultEntry(target)
+    process.stdout.write(`Default entry set to '${target}'.\n`)
+    return
+  }
+  if (sub === 'install' || sub === 'remove') {
+    // install/remove parse --force and the operand in lib/entryInstall so this
+    // stays a thin try/catch: one-line success to stdout, one-line error + 1.
+    try {
+      process.stdout.write(entryInstallCommand(sub, args.slice(1)) + '\n')
+    } catch (err) {
+      if (!(err instanceof EntryInstallError)) throw err // a real bug — let main's catch show the stack
+      process.stderr.write(`Error: ${err.message}\n`)
+      process.exit(1)
+    }
+    return
+  }
+  process.stderr.write(`Usage: meowcode entry list|new <name>|use <name>|default [off]|install <spec>|remove <name>\n`)
+  process.exit(1)
+}
+
 async function main(): Promise<void> {
   if (has('-h', '--help')) { printHelp(); return }
   if (has('-v', '--version')) { process.stdout.write(VERSION + '\n'); return }
+
+  // Entry (profile) resolution, before anything config-touching: an explicit
+  // --entry wins; else the persisted default; else global mode. A positional
+  // shorthand `meowcode <name>` activates when argv[0] is an existing entry
+  // name (and is then removed so it isn't parsed as anything else).
+  if (argv[0] === 'entry') { runEntryCommand(argv.slice(1)); return }
+  if (argv[0] && !argv[0].startsWith('-') && entryExists(argv[0])) {
+    const shorthand = argv.shift() ?? null
+    activateEntry(shorthand)
+  } else {
+    const entryFlag = flagValue('--entry')
+    if (entryFlag === '') {
+      // --entry present but no usable value
+      process.stderr.write('Error: --entry requires a name (see `meowcode entry list`).\n')
+      process.exit(1)
+    }
+    const name = entryFlag !== undefined && entryFlag !== '' ? entryFlag : getDefaultEntry()
+    if (name) {
+      if (!entryExists(name)) {
+        process.stderr.write(`Error: entry '${name}' does not exist (see 'meowcode entry list').\n`)
+        process.exit(1)
+      }
+      activateEntry(name)
+    } else {
+      activateEntry(null)
+    }
+  }
 
   let config = loadConfig()
   const model = flagValue('--model')
   if (model) config.model = model
   const provider = flagValue('--provider')
   if (provider) config.provider = provider
+
+  // Launcher front-end: an entry that declares "launcher" (a webui, a tray app,
+  // any non-TUI surface) takes over the process here — the Ink TUI never
+  // mounts. With no launcher, MeowCode itself IS the TUI (the default entry).
+  const launcher = activeEntry() ? readLauncherConfig(activeEntry()!.dir) : null
+  if (launcher && !has('-p', '--print')) {
+    await runLauncher(launcher, config)
+    return
+  }
 
   if (has('-p', '--print')) {
     const prompt = flagValue('-p', '--print')

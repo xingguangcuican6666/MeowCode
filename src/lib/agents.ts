@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { parseFrontmatter } from './frontmatter'
+import { activeEntry } from './entries'
 
 export interface CustomAgent {
   name: string
@@ -23,9 +24,15 @@ export interface CustomAgent {
   source: string
 }
 
-// User-global agents, then project-local ones (project wins on name clash).
+// Merge order: entry (when one is active) → user-global → project-local, with
+// later dirs overriding earlier ones on a name clash. No entry → the legacy two
+// dirs, byte-for-byte.
 export function agentDirs(cwd = process.cwd()): string[] {
-  return [path.join(os.homedir(), '.anycode', 'agents'), path.join(cwd, '.anycode', 'agents')]
+  const dirs: string[] = []
+  const entry = activeEntry()
+  if (entry) dirs.push(path.join(entry.dir, 'agents'))
+  dirs.push(path.join(os.homedir(), '.anycode', 'agents'), path.join(cwd, '.anycode', 'agents'))
+  return dirs
 }
 
 function parseList(v: string | undefined): string[] | undefined {

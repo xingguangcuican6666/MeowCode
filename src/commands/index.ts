@@ -26,6 +26,8 @@ import { loadAgents } from '../lib/agents'
 import { subagentTypeNames } from '../tools/orchestration'
 import { availableUpdate, type UpdateChannel } from '../lib/update'
 import { CONFIG_FILE } from '../config'
+import { listEntries, isValidEntryName, entryExists, getDefaultEntry, setDefaultEntry, activeEntry, activeEntryName, createEntry, readEntryOverrides, isLauncherDecl } from '../lib/entries'
+import { removeEntry, EntryInstallError } from '../lib/entryInstall'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -309,10 +311,14 @@ const status: SlashCommand = {
     const loopLine = ctx.loopStatus?.() ?? t('cmd.statusNone')
     const skills = loadSkills()
     const custom = loadUserCommands()
+    // Entry line only when one is active — global mode keeps /status byte-for-byte.
+    const activeName = activeEntryName()
+    const entryLine = activeName ? [t('cmd.statusEntry', { name: activeName })] : []
     ctx.print(
       [`**${NAME} v${VERSION}**`, '',
         t('cmd.statusCwd', { cwd: process.cwd() }),
         t('cmd.statusProviderModel', { provider: c.provider, model: c.model }),
+        ...entryLine,
         t('cmd.statusApiTheme', { apiKey: c.apiKey ? t('cmd.statusSet') : t('cmd.statusNotSet'), theme: c.theme ?? DEFAULT_THEME }),
         t('cmd.statusContext', { bar: bar(ctxState.ratio, 12), pct, level }),
         t('cmd.statusSession', { turns: u.turns, tokens: fmtTokens(u.inputTokens + u.outputTokens), toolCalls: u.toolCalls, compactions: u.compactions }),
@@ -1275,7 +1281,86 @@ const chrome: SlashCommand = {
   },
 }
 
-const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, resume, fork, version, exit]
+// /entry — the in-session management surface for entries (dsh-style profiles).
+// Management only: an entry binds at startup (--entry / positional / default), so
+// this lists, creates, and edits the default pointer but never switches the
+// active entry — changing that needs a restart, which every message says.
+// Remove reuses the installer's removeEntry so its sessions/memory protection
+// (--force) applies everywhere; its EntryInstallError reads as a clean red line.
+const entry: SlashCommand = {
+  name: 'entry',
+  get description() { return t('cmd.entryDesc') },
+  run(ctx) {
+    const arg = ctx.args.trim()
+    const sp = arg.indexOf(' ')
+    const verb = (sp === -1 ? arg : arg.slice(0, sp)).toLowerCase()
+    const rest = sp === -1 ? '' : arg.slice(sp + 1).trim()
+
+    const printList = () => {
+      const ents = listEntries()
+      if (!ents.length) { ctx.print(t('cmd.entryNone'), 'system'); return }
+      const def = getDefaultEntry()
+      const active = activeEntryName()
+      const lines = ents.map((e) => {
+        const marks = [e.name === active ? '● ' : '', e.name === def ? t('cmd.entryDefaultSuffix') : '', e.hasLauncher ? t('cmd.entryLauncherMark') : ''].filter(Boolean).join(' ')
+        return `- \`${e.name}\`${marks ? ' ' + marks : ''}${e.description ? ' — ' + e.description : ''}`
+      })
+      ctx.print([t('cmd.entryTitle'), '', ...lines, '', t('cmd.entryListFooter')].join('\n'), 'system')
+    }
+
+    if (verb === '' || verb === 'list' || verb === 'ls') { printList(); return }
+
+    if (verb === 'current') {
+      const a = activeEntry()
+      if (!a) { ctx.print(t('cmd.entryCurrentGlobal'), 'system'); return }
+      const hasLc = isLauncherDecl(readEntryOverrides(a.name).launcher)
+      ctx.print(t(hasLc ? 'cmd.entryCurrentLauncher' : 'cmd.entryCurrent', { name: a.name, dir: a.dir }), 'system')
+      return
+    }
+
+    if (verb === 'new' || verb === 'create') {
+      const [name, ...descParts] = rest.split(/\s+/)
+      if (!name) { ctx.print(t('cmd.entryNewUsage'), 'system', { error: true }); return }
+      if (!isValidEntryName(name)) { ctx.print(t('cmd.entryInvalidName', { name }), 'system', { error: true }); return }
+      if (entryExists(name)) { ctx.print(t('cmd.entryExists', { name }), 'system', { error: true }); return }
+      createEntry(name, { description: descParts.length ? descParts.join(' ') : undefined })
+      ctx.print(t('cmd.entryCreated', { name }), 'system')
+      return
+    }
+
+    if (verb === 'default' || verb === 'use') {
+      // `use` is an alias of default here (dsh names it default; README promises
+      // both spellings) — the binding still happens at startup, never live.
+      if (!rest) {
+        const def = getDefaultEntry()
+        ctx.print(def ? t('cmd.entryDefaultCurrent', { name: def }) : t('cmd.entryDefaultUnset'), 'system')
+        return
+      }
+      if (rest === 'off' || rest === 'none') { setDefaultEntry(null); ctx.print(t('cmd.entryDefaultCleared'), 'system'); return }
+      if (!isValidEntryName(rest)) { ctx.print(t('cmd.entryInvalidName', { name: rest }), 'system', { error: true }); return }
+      if (!entryExists(rest)) { ctx.print(t('cmd.entryNoEntry', { name: rest }), 'system', { error: true }); return }
+      setDefaultEntry(rest)
+      ctx.print(t('cmd.entryDefaultSet', { name: rest }), 'system')
+      return
+    }
+
+    if (verb === 'remove' || verb === 'rm') {
+      const name = rest.replace(/\s+--force$|(--force)\s+/, '').trim()
+      const force = /(^|\s)--force(\s|$)/.test(rest) || /(^|\s)-f(\s|$)/.test(rest)
+      if (!name) { ctx.print(t('cmd.entryRemoveUsage'), 'system', { error: true }); return }
+      try {
+        ctx.print(removeEntry(name, { force }), 'system')
+      } catch (e) {
+        ctx.print(e instanceof EntryInstallError ? e.message : String(e), 'system', { error: true })
+      }
+      return
+    }
+
+    ctx.print(t('cmd.entryUsage'), 'system', { error: true })
+  },
+}
+
+const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, entry, resume, fork, version, exit]
 
 // Merge user-defined commands (from ~/.anycode/commands and ./.anycode/commands)
 // into the registry, but never let them shadow a built-in name or alias. Loaded

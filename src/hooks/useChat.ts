@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentSnapshot, AppConfig, LoopSpec, Message, MessageMeta, PanelTab, PermissionRequest, Role, UserInputRequest, UserInputResponse, WorkflowSnapshot } from '../types'
 import { getProvider } from '../providers'
 import { isCommand, runCommand } from '../commands'
-import { saveConfig } from '../config'
+import { entryAwareSaveConfig } from '../lib/entries'
 import { standingPreamble } from '../lib/memory'
 import { projectInstructionsPreamble } from '../lib/projectInstructions'
 import { customAgentCatalog } from '../tools/orchestration'
@@ -222,11 +222,13 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
     const next = { ...configRef.current, ...patch }
     configRef.current = next
     setConfigState(next)
-    // Persist the change so /model and /provider survive a restart. saveConfig
-    // strips the apiKey before writing, so the key never touches disk. Pass
+    // Persist the change so /model and /provider survive a restart. The
+    // entry-aware save writes the entry's own settings.json when an entry is
+    // active (global settings.json otherwise) and strips the apiKey before
+    // writing, so the key never touches disk. Pass
     // { persist: false } to apply a change for THIS session only (the "s" key in
     // the /effort slider), leaving the on-disk config untouched.
-    if (opts?.persist !== false) saveConfig(next)
+    if (opts?.persist !== false) entryAwareSaveConfig(next)
   }, [])
 
   const print = useCallback((content: string, role: Role = 'system', meta?: MessageMeta) => {

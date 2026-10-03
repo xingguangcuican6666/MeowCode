@@ -13,6 +13,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { parseFrontmatter } from './frontmatter'
+import { activeEntry, stateDir } from './entries'
 
 // --- The standing loop goal (unchanged storage, so /goal + the judge keep working). ---
 export interface GoalStore {
@@ -20,11 +21,16 @@ export interface GoalStore {
   updatedAt: string
 }
 
-export const MEMORY_FILE = path.join(os.homedir(), '.anycode', 'memory.json')
+// The goal store's file, resolved at CALL time so it follows the active entry:
+// ~/.anycode/memory.json in global mode (the legacy path, byte-for-byte), or
+// <entry>/memory.json when one is active.
+function memoryFile(): string {
+  return activeEntry() ? path.join(activeEntry()!.dir, 'memory.json') : path.join(os.homedir(), '.anycode', 'memory.json')
+}
 
 export function loadMemory(): GoalStore {
   try {
-    const raw = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8')) as Partial<GoalStore> & { notes?: unknown }
+    const raw = JSON.parse(fs.readFileSync(memoryFile(), 'utf8')) as Partial<GoalStore> & { notes?: unknown }
     // One-time migration: an older build kept free-form notes here; move each into
     // the structured store so nothing is lost, then drop them from the JSON.
     if (Array.isArray(raw.notes) && raw.notes.length > 0) migrateNotes(raw.notes)
@@ -42,8 +48,9 @@ export function loadMemory(): GoalStore {
 export function saveMemory(m: GoalStore): void {
   m.updatedAt = new Date().toISOString()
   try {
-    fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true })
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify({ goal: m.goal, updatedAt: m.updatedAt }, null, 2))
+    const file = memoryFile()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ goal: m.goal, updatedAt: m.updatedAt }, null, 2))
   } catch {
     // best-effort; goal persistence is non-critical
   }
@@ -69,9 +76,10 @@ function migrateNotes(notes: unknown[]): void {
 // Two scopes, mirroring Claude Code: a GLOBAL store shared across every project
 // (the user's identity/preferences), and a per-PROJECT (workspace) store keyed by
 // the working directory, so a project's facts don't leak into unrelated sessions.
-// Both live under ~/.anycode (never in the repo): global at ~/.anycode/memory/,
-// project at ~/.anycode/projects/<cwd-slug>/memory/. Each scope has its own
-// MEMORY.md index. Saves default to the current workspace.
+// Both live under the active state root (global: ~/.anycode; entry: the entry's
+// own dir) — global at <root>/memory/, project at <root>/projects/<cwd-slug>/memory/
+// — and never in the repo. Each scope has its own MEMORY.md index. Saves default
+// to the current workspace.
 export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
 export const MEMORY_TYPES: readonly MemoryType[] = ['user', 'feedback', 'project', 'reference']
 
@@ -88,12 +96,15 @@ export interface MemoryEntry {
   modified: string
 }
 
-const ANYCODE_DIR = path.join(os.homedir(), '.anycode')
-
-// The global store, shared across every project.
-export const MEMORY_DIR = path.join(ANYCODE_DIR, 'memory')
+// The global store, shared across every project — the entry's own memory/ when an
+// entry is active, else the legacy ~/.anycode/memory. Resolved at call time.
+function globalMemoryDir(): string {
+  return stateDir('memory')
+}
 // Back-compat: the global index path (scope-aware callers use indexFile()).
-export const MEMORY_INDEX = path.join(MEMORY_DIR, 'MEMORY.md')
+export function MEMORY_INDEX(): string {
+  return path.join(globalMemoryDir(), 'MEMORY.md')
+}
 
 // Key project memory by cwd the way Claude Code does: path separators (and ':' on
 // Windows) collapse to '-', so /home/u/app → -home-u-app. The workspace store thus
@@ -104,7 +115,7 @@ function projectSlug(): string {
 
 // The directory backing a given scope.
 export function memoryDir(scope: MemoryScope): string {
-  return scope === 'global' ? MEMORY_DIR : path.join(ANYCODE_DIR, 'projects', projectSlug(), 'memory')
+  return scope === 'global' ? globalMemoryDir() : path.join(stateDir('projects'), projectSlug(), 'memory')
 }
 
 function indexFile(scope: MemoryScope): string {

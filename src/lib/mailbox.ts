@@ -1,19 +1,27 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
+import { stateDir } from './entries'
 
 // A tiny file-based mailbox so concurrent MeowCode sessions (same machine, same
 // user) can message each other — what the `otherSessionMessages` setting
-// surfaces ('off' | 'notify' | 'deliver'). Everything lives under
-// ~/.anycode/mailbox/: one JSON file per message, plus a presence/ subdir where
-// each running session heartbeats a file so peers can be listed and DM'd.
+// surfaces ('off' | 'notify' | 'deliver'). Everything lives under the mailbox
+// state dir (~/.anycode/mailbox/, or the active entry's own mailbox/): one JSON
+// file per message, plus a presence/ subdir where each running session
+// heartbeats a file so peers can be listed and DM'd.
 //
 // Best-effort throughout: a missing dir means "no peers / no mail", and every
 // read/write swallows its error rather than throwing into the UI. This is a
 // same-machine convenience, not a durable queue — old mail and dead sessions'
 // presence files are garbage-collected on access.
-const DIR = path.join(os.homedir(), '.anycode', 'mailbox')
-const PRES = path.join(DIR, 'presence')
+
+// Both dirs resolve at CALL time so they follow the active entry (global mode
+// yields the legacy ~/.anycode/mailbox path, byte-for-byte).
+function dir(): string {
+  return stateDir('mailbox')
+}
+function pres(): string {
+  return path.join(dir(), 'presence')
+}
 const PRESENCE_TTL = 30_000        // a presence file older than this = dead session
 const MAIL_TTL = 10 * 60_000       // mail older than this is GC'd
 const MAX_MAIL = 500               // hard cap on mailbox size
@@ -46,8 +54,8 @@ function readJsonFiles<T>(dir: string): Array<{ file: string; data: T }> {
 export function announce(now: number): void {
   if (!self) return
   try {
-    fs.mkdirSync(PRES, { recursive: true })
-    fs.writeFileSync(path.join(PRES, `${self.id}.json`), JSON.stringify({ id: self.id, title: self.title, cwd: self.cwd, at: now }))
+    fs.mkdirSync(pres(), { recursive: true })
+    fs.writeFileSync(path.join(pres(), `${self.id}.json`), JSON.stringify({ id: self.id, title: self.title, cwd: self.cwd, at: now }))
   } catch { /* best-effort */ }
 }
 
@@ -55,14 +63,14 @@ export function announce(now: number): void {
 // once rather than waiting for the TTL).
 export function farewell(): void {
   if (!self) return
-  try { fs.unlinkSync(path.join(PRES, `${self.id}.json`)) } catch { /* already gone */ }
+  try { fs.unlinkSync(path.join(pres(), `${self.id}.json`)) } catch { /* already gone */ }
 }
 
 // Live peer sessions (fresh presence, not us), newest first. Stale entries are
 // unlinked as we pass over them so the directory self-cleans.
 export function livePeers(now: number): Peer[] {
   const peers: Peer[] = []
-  for (const { file, data } of readJsonFiles<Peer>(PRES)) {
+  for (const { file, data } of readJsonFiles<Peer>(pres())) {
     if (!data || typeof data.id !== 'string') continue
     if (now - data.at >= PRESENCE_TTL) { try { fs.unlinkSync(file) } catch { /* ignore */ } ; continue }
     if (self && data.id === self.id) continue
@@ -73,7 +81,7 @@ export function livePeers(now: number): Peer[] {
 
 // Trim the mailbox: drop expired mail, then the oldest beyond MAX_MAIL.
 function gcMail(now: number): void {
-  const all = readJsonFiles<Mail>(DIR)
+  const all = readJsonFiles<Mail>(dir())
   const live = all.filter(({ file, data }) => {
     if (!data || now - data.ts >= MAIL_TTL) { try { fs.unlinkSync(file) } catch { /* ignore */ } ; return false }
     return true
@@ -89,9 +97,9 @@ function gcMail(now: number): void {
 export function sendMail(to: string, text: string, now: number, rand: string): boolean {
   if (!self) return false
   try {
-    fs.mkdirSync(DIR, { recursive: true })
+    fs.mkdirSync(dir(), { recursive: true })
     const mail: Mail = { id: `${now}-${rand}`, from: self.id, fromTitle: self.title, to, text, ts: now }
-    fs.writeFileSync(path.join(DIR, `${mail.id}.json`), JSON.stringify(mail))
+    fs.writeFileSync(path.join(dir(), `${mail.id}.json`), JSON.stringify(mail))
     gcMail(now)
     return true
   } catch { return false }
@@ -102,7 +110,7 @@ export function sendMail(to: string, text: string, now: number, rand: string): b
 export function pollMail(sinceTs: number, now: number): Mail[] {
   if (!self) return []
   const mine: Mail[] = []
-  for (const { data } of readJsonFiles<Mail>(DIR)) {
+  for (const { data } of readJsonFiles<Mail>(dir())) {
     if (!data || typeof data.ts !== 'number' || typeof data.text !== 'string') continue
     if (data.ts <= sinceTs || data.from === self.id) continue
     if (data.to === self.id || data.to === '*') mine.push(data)

@@ -52,6 +52,41 @@ npm run start       # node dist/cli.js
 - UI language is i18n'd (zh/en/auto) — see `src/lib/i18n.ts`; the codebase has
   substantial Chinese comments and some Chinese UI strings.
 
+### Entries (profiles)
+
+`src/lib/entries.ts` — dsh-style profiles: self-contained dirs under
+`~/.anycode/entries/<name>/`.
+
+- Per entry: `entry.json` (manifest + overrides), `settings.json` (config saved
+  while active), state (`sessions/ memory/ projects/ mailbox/ history.json`),
+  content (`skills/ commands/ agents/`).
+- Chosen once at CLI startup: `--entry <name>` → `meowcode <name>` shorthand →
+  default in `~/.anycode/entry.json` (`{ "default": name }`). **No hot-switch** —
+  restart to change entries; in-session `/entry` only lists/sets the default.
+- Config layering (low → high): defaults → global `settings.json` → entry
+  `settings.json` → `entry.json` overrides (`applyEntryOverrides`, called from
+  `loadConfig`). `settings` bag merges key-by-key; bag keys (hooks/mcpServers/
+  permissions/customProviders) replace whole when `entry.json` carries them.
+- Resources resolve **entry → global → project** via `stateDir()`/`stateFile()`.
+- Machine-global (never per-entry): `credentials.json`, usage stats, update
+  cache. API key is always env-sourced, never from entry files.
+- Config persistence goes through `entryAwareSaveConfig` (global mode → plain
+  `saveConfig`). Installer: `meowcode entry install <npm pkg | git url | local
+  path>` reads the `meowcode.entry` template field from the package manifest;
+  `meowcode entry remove <name>` deletes. `createEntry` never overwrites files.
+- Has-entry plugins (`src/lib/launcher.ts`): an entry's `entry.json` may declare
+  `"launcher": { "command", "args?", "cwd?", "env?" }`; when active the CLI
+  skips the Ink TUI and spawns the front-end over newline-delimited JSON-RPC
+  2.0 stdio (plugin = client, host = server; handshake `initialize` with
+  protocol `2025-meowcode-launcher-1`). Host methods: `agent/turn` (+
+  `agent/event` stream), `tools/list`, `tools/call`, `config/get` (no apiKey),
+  `session/state`, `session/reset`. Transcript stays host-side (TUI-identical
+  rows, `/resume`-compatible, autosaved to the entry's `sessions/`); turns run
+  `bypassPermissions` with entry `permissions` rules bound. Print mode bypasses
+  the launcher. Lists mark these entries `[launcher]`.
+- With no entry active (`entryActive() === false`) behavior is byte-identical to
+  pre-entries global mode — keep it that way.
+
 ## Architecture
 
 ```

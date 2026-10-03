@@ -10,9 +10,14 @@
 // history yet", and a failed write silently drops that one entry.
 import path from 'node:path'
 import fs from 'node:fs'
-import { CONFIG_DIR } from '../config'
+import { stateFile } from './entries'
 
-export const HISTORY_FILE = path.join(CONFIG_DIR, 'history.json')
+// The history file, resolved at CALL time so it follows the active entry:
+// ~/.anycode/history.json in global mode (the legacy path), or the entry's own
+// history.json when one is active.
+function historyFile(): string {
+  return stateFile('history')
+}
 
 // Cap the stored list so the file can't grow without bound over months of use.
 // Plenty for ↑-recall; older entries fall off the end (they're the least recent).
@@ -23,7 +28,7 @@ const MAX_ENTRIES = 1000
 // can never inject non-string junk into the input box.
 export function loadHistory(): string[] {
   try {
-    const raw = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) as unknown
+    const raw = JSON.parse(fs.readFileSync(historyFile(), 'utf8')) as unknown
     if (!Array.isArray(raw)) return []
     return raw.filter((e): e is string => typeof e === 'string' && e.length > 0).slice(0, MAX_ENTRIES)
   } catch {
@@ -42,8 +47,8 @@ export function appendHistory(entry: string): void {
     if (list[0] === v) return // don't store consecutive duplicates
     list.unshift(v)
     if (list.length > MAX_ENTRIES) list.length = MAX_ENTRIES
-    fs.mkdirSync(CONFIG_DIR, { recursive: true })
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(list))
+    fs.mkdirSync(path.dirname(historyFile()), { recursive: true })
+    fs.writeFileSync(historyFile(), JSON.stringify(list))
   } catch {
     // best-effort; losing one history entry is non-critical
   }
