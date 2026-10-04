@@ -25,9 +25,13 @@ import {
   listEntries, setDefaultEntry, activeEntryName,
 } from './lib/entries'
 import { readLauncherConfig, runLauncher } from './lib/launcher'
-// The AnyCode→MeowCode rename migration (one-time prompt at startup, see
-// lib/legacyDir.ts for why it must run before config is read).
-import { offerLegacyMigration } from './lib/legacyDir'
+// The AnyCode→MeowCode rename migration (one-time question at startup, see
+// lib/legacyDir.ts for why it must run before the entry/config are resolved).
+import { CONFIG_DIR, offerLegacyMigration, reportMergeOutcome, type LegacyDirInfo } from './lib/legacyDir'
+import { LegacyDirDialog, type LegacyChoice } from './components/LegacyDirDialog'
+import { getTheme, ThemeProvider } from './theme'
+import { getSetting } from './lib/settings'
+import { LangProvider, resolveLang, setLang } from './lib/i18n'
 
 const argv = process.argv.slice(2)
 
@@ -103,35 +107,17 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8').trim()
 }
 
-// Interactive session. Both /clear and /compact tear down the Ink instance and
-// remount a fresh one — the reliable way to reset Ink's log-update accounting
-// and re-seed the transcript. /clear starts empty; /compact carries the folded
-// transcript forward via a SessionSnapshot. Resize no longer remounts (the
-// owned viewport reflows on a dims state change), so there is no <Static> to
-// desync. We own the whole screen via the alternate buffer for the session's
-// lifetime and, on a clean exit, leave the terminal tidy the way Claude Code
-// does — no full-transcript dump, just a one-line closing trace (see finally).
-async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSnapshot; id: string }): Promise<void> {
-  let config = initial
-  let snapshot: SessionSnapshot | null = resume?.snapshot ?? null
-  // True only while `snapshot` came from /resume or --continue (not a /compact
-  // remount), so App shows the session recap exactly once on a real reopen.
-  let resumed = !!resume
-  // Latest live session state, kept current by App via onSnapshot, so the exit
-  // dump prints the final transcript after we leave the alternate screen.
-  let last: SessionSnapshot | null = null
-  // The id of the session file we autosave into. One per process, EXCEPT /clear
-  // (rotates to a fresh session) and /resume (adopts the reopened session's id).
-  let sessionId = resume?.id ?? newSessionId()
-  // Debounce autosaves: transcripts change on every token while streaming, so we
-  // coalesce writes to at most one per idle window rather than hitting the disk
-  // per frame. The finally block flushes a final save on exit.
-  let saveTimer: ReturnType<typeof setTimeout> | null = null
-  const scheduleSave = (): void => {
-    if (saveTimer) clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => { saveTimer = null; if (last) saveSession(sessionId, last) }, 1500)
-  }
+// Own the terminal for a stretch of raw-mode input: alternate screen, mouse
+// reporting, kitty keyboard protocol, and a PassThrough that proxies the TTY
+// controls Ink needs while we decode the real fd ourselves. Shared by the
+// startup migration dialog and the interactive session so both get the same
+// screen, the same mouse modes, and the same (unconditional) restore — see
+// restore() below for why that matters. The 'exit'/signal listeners accumulate
+// across calls, but restore() is idempotent, so the last one to fire is the
+// only one that writes.
+interface TermSession { wrapped: PassThrough; restore: () => void }
 
+function openTermSession(): TermSession {
   process.stdout.write(ALT_ON + MOUSE_ON + KITTY_ON + CLEAR)
 
   // Sit a translator in front of Ink's stdin so the kitty keyboard protocol
@@ -163,6 +149,11 @@ async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSn
   const decoder = new StringDecoder('utf8')
   const forward = (chunk: Buffer): void => { translate(decoder.write(chunk)) }
   source.on('data', forward)
+  // Attaching 'data' resumes the stream, but it does NOT undo an unref() from a
+  // previous session's restore() (the migration dialog opens and closes one
+  // before this), and an unref'd TTY handle never keeps the event loop alive —
+  // the process would exit before the prompt ever rendered.
+  try { source.ref?.() } catch { /* ignore */ }
 
   let restored = false
   const restore = (): void => {
@@ -189,6 +180,39 @@ async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSn
   for (const sig of ['SIGTERM', 'SIGHUP', 'SIGQUIT'] as const) {
     process.once(sig, () => { restore(); process.exit(sig === 'SIGTERM' ? 143 : sig === 'SIGHUP' ? 129 : 131) })
   }
+  return { wrapped, restore }
+}
+
+// Interactive session. Both /clear and /compact tear down the Ink instance and
+// remount a fresh one — the reliable way to reset Ink's log-update accounting
+// and re-seed the transcript. /clear starts empty; /compact carries the folded
+// transcript forward via a SessionSnapshot. Resize no longer remounts (the
+// owned viewport reflows on a dims state change), so there is no <Static> to
+// desync. We own the whole screen via the alternate buffer for the session's
+// lifetime and, on a clean exit, leave the terminal tidy the way Claude Code
+// does — no full-transcript dump, just a one-line closing trace (see finally).
+async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSnapshot; id: string }): Promise<void> {
+  let config = initial
+  let snapshot: SessionSnapshot | null = resume?.snapshot ?? null
+  // True only while `snapshot` came from /resume or --continue (not a /compact
+  // remount), so App shows the session recap exactly once on a real reopen.
+  let resumed = !!resume
+  // Latest live session state, kept current by App via onSnapshot, so the exit
+  // dump prints the final transcript after we leave the alternate screen.
+  let last: SessionSnapshot | null = null
+  // The id of the session file we autosave into. One per process, EXCEPT /clear
+  // (rotates to a fresh session) and /resume (adopts the reopened session's id).
+  let sessionId = resume?.id ?? newSessionId()
+  // Debounce autosaves: transcripts change on every token while streaming, so we
+  // coalesce writes to at most one per idle window rather than hitting the disk
+  // per frame. The finally block flushes a final save on exit.
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleSave = (): void => {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => { saveTimer = null; if (last) saveSession(sessionId, last) }, 1500)
+  }
+
+  const { wrapped, restore } = openTermSession()
 
   try {
     for (;;) {
@@ -317,16 +341,69 @@ function runEntryCommand(args: string[]): void {
   process.exit(1)
 }
 
+// The one-time ~/.anycode → ~/.meowcode question, as an Ink dialog. It runs in
+// its own short-lived Ink instance on the alternate screen — the same mode the
+// session owns — so the question starts at screen row 1 (which is what the
+// dialog's mouse hit-test assumes), Ink owns every pixel while it is up, and
+// leaving the buffer hands the user's shell back untouched. The one-line result
+// is written by the caller, after we're back on the normal screen.
+async function askLegacyDir(info: LegacyDirInfo): Promise<LegacyChoice> {
+  // Same palette/language the TUI would use, so the dialog doesn't flash a
+  // different theme than the session that follows it.
+  const boot = loadConfig()
+  const colors = getTheme(boot.theme).colors
+  const lang = resolveLang(getSetting(boot.settings, 'language') as string)
+  const { wrapped, restore } = openTermSession()
+
+  return new Promise<LegacyChoice>((resolve) => {
+    let settled = false
+    // Declared as a hoisted function so the JSX below can hand it to the dialog
+    //; it only runs after render() returned, so `instance` is bound by then.
+    function finish(choice: LegacyChoice): void {
+      if (settled) return
+      settled = true
+      // Give the terminal back FIRST (the restore also drops mouse tracking, the
+      // kitty protocol, and the alternate buffer), then resolve so the report is
+      // written onto the normal screen rather than a buffer we're leaving.
+      instance.unmount()
+      restore()
+      resolve(choice)
+    }
+    const instance = render(
+      <ThemeProvider value={colors}>
+        <LangProvider value={lang}>
+          <LegacyDirDialog info={info} dest={CONFIG_DIR} onDone={finish} />
+        </LangProvider>
+      </ThemeProvider>,
+      { exitOnCtrlC: true, stdin: wrapped as unknown as NodeJS.ReadStream },
+    )
+    // Ctrl+C (exitOnCtrlC) or a closed stdin tears Ink down with no answer;
+    // treat that as "skip" rather than hanging — the same degradation the old
+    // readline prompt had.
+    void instance.waitUntilExit().then(() => finish('skip'))
+  })
+}
+
 async function main(): Promise<void> {
   if (has('-h', '--help')) { printHelp(); return }
   if (has('-v', '--version')) { process.stdout.write(VERSION + '\n'); return }
 
+  // Language + palette for the migration dialog below. Read straight off disk
+  // rather than through loadConfig(): this runs before the entry is resolved,
+  // and asking a Chinese user a question in English (or the reverse) is exactly
+  // the kind of thing a migration notice should not do. setLang() syncs the
+  // module-level mirror so the post-answer report speaks the same language.
+  const bootCfg = loadConfig()
+  setLang(resolveLang(getSetting(bootCfg.settings, 'language') as string))
+
   // Legacy config-dir migration: this build reads ~/.meowcode only, so a user
   // upgrading from the AnyCode era would silently start with an empty history.
-  // Ask (and merge, additively) BEFORE anything reads config — and before Ink
-  // mounts, since that is the only point raw-mode stdin is safely ours. No-op
-  // when there is no old dir or the new one already has state.
-  await offerLegacyMigration()
+  // Ask BEFORE the entry is resolved and before the TUI mounts — the dialog runs
+  // in its own short-lived Ink session (own terminal modes, own stdin wrapper),
+  // then hands control back. No-op when there's no old dir or ~/.meowcode
+  // already has state; print mode / pipes get the stderr notice instead.
+  const outcome = await offerLegacyMigration(askLegacyDir)
+  if (outcome.merged) reportMergeOutcome(outcome)
 
   // Entry (profile) resolution, before anything config-touching: an explicit
   // --entry wins; else the persisted default; else global mode. A positional

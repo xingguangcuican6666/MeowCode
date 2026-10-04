@@ -697,6 +697,25 @@ export const messages = {
   'run.write': { zh: '写入', en: 'Write' },
   'run.noChanges': { zh: '无改动', en: 'No changes' },
   'run.changeSummary': { zh: '新增 {added} 行，删除 {removed} 行', en: 'Added {added} line{al}, removed {removed} line{rl}' },
+
+  // LegacyDirDialog (src/components/LegacyDirDialog.tsx) — the one-time
+  // ~/.anycode → ~/.meowcode config-dir migration asked at startup. The dialog
+  // is rendered by Ink before the TUI mounts; lib/legacyDir prints the same keys
+  // for the non-TTY stderr notice and the post-answer summary via the
+  // module-level t(), so both paths speak the user's language.
+  'legacy.title': { zh: '迁移旧配置目录', en: 'Migrate the old config directory' },
+  'legacy.why': { zh: '{old} 是本工具还叫 AnyCode 时的配置目录，本版本已不再读取它，现在只读 {new}。', en: '{old} holds the config from when this tool was called AnyCode. This build no longer reads it — it reads {new} instead.' },
+  'legacy.found': { zh: '旧目录中的内容：', en: 'Found in the old directory:' },
+  'legacy.empty': { zh: '（空）', en: '(empty)' },
+  'legacy.more': { zh: '…另有 {n} 项', en: '…and {n} more' },
+  'legacy.merge': { zh: '合并到 {new}（不删除任何东西）', en: 'Merge into {new} — nothing is deleted' },
+  'legacy.skip': { zh: '暂时跳过，稍后手动迁移', en: 'Skip for now — migrate by hand later' },
+  'legacy.later': { zh: '稍后可自行执行：mv {old} {new}', en: 'Migrate later by hand:  mv {old} {new}' },
+  'legacy.footer': { zh: '↑↓/滚轮 选择 · 1-2 跳转 · ↵/点击 确认 · y/n 直接答 · esc 跳过', en: '↑↓/wheel select · 1-2 jump · ↵/click confirm · y/n answer · esc skip' },
+  'legacy.merged': { zh: '已合并 {files} 个文件、{dirs} 个目录。旧目录仍在原处，确认无误后可自行删除。', en: 'Merged {files} file(s) from {dirs} director(ies). The old directory is untouched — remove it yourself once you have checked.' },
+  'legacy.kept': { zh: '另有 {n} 个同名文件已保留（新目录里已有的优先）。', en: '{n} existing file(s) kept — the ones already in the new directory win.' },
+  'legacy.notice': { zh: '注意：旧 AnyCode 时代的配置目录 {old} 里还有数据，本版本已不再读取它。', en: 'Note: found config from the old AnyCode era at {old}, which this build no longer reads.' },
+  'legacy.noticeHint': { zh: '迁移方式：mv {old} {new}', en: 'Migrate it with:  mv {old} {new}' },
 } as const
 
 export type MessageKey = keyof typeof messages

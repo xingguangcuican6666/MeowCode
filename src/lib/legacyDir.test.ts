@@ -32,7 +32,10 @@ import {
   shouldOfferMigration,
   inspectLegacyDir,
   mergeLegacyDir,
+  offerLegacyMigration,
+  reportMergeOutcome,
 } from './legacyDir'
+import { setLang } from './i18n'
 
 function write(file: string, body: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -151,5 +154,87 @@ describe('mergeLegacyDir', () => {
   it('is a no-op when the legacy dir is gone', () => {
     expect(mergeLegacyDir()).toEqual({ files: 0, dirs: 0, skipped: 0 })
     expect(fs.existsSync(CONFIG_DIR)).toBe(false)
+  })
+})
+
+describe('offerLegacyMigration', () => {
+  // The dialog lives in Ink and is driven by cli.tsx; this module only takes the
+  // answer, so these tests inject one. `isTTY` stands in for "can we ask at all"
+  // — the non-TTY branch is the one print mode / pipes / CI take.
+  function withTTY<T>(value: boolean, fn: () => Promise<T>): Promise<T> {
+    const prev = process.stdin.isTTY
+    Object.defineProperty(process.stdin, 'isTTY', { value, configurable: true })
+    return fn().finally(() => { Object.defineProperty(process.stdin, 'isTTY', { value: prev, configurable: true }) })
+  }
+
+  it('merges on "merge" and leaves the source dir intact', async () => {
+    seedLegacy({ 'settings.json': '{"model":"old"}', 'sessions/a.json': '{"id":"a"}' })
+    const outcome = await withTTY(true, () => offerLegacyMigration(async () => 'merge'))
+    expect(outcome.offered).toBe(true)
+    expect(outcome.merged).toBe(true)
+    expect(outcome.result?.files).toBe(2)
+    expect(fs.readFileSync(path.join(CONFIG_DIR, 'settings.json'), 'utf8')).toBe('{"model":"old"}')
+    expect(fs.existsSync(path.join(LEGACY_CONFIG_DIR, 'settings.json'))).toBe(true)
+    expect(fs.existsSync(path.join(CONFIG_DIR, '.migrated-from-anycode'))).toBe(true)
+  })
+
+  it('creates nothing on "skip"', async () => {
+    seedLegacy({ 'settings.json': '{"model":"old"}' })
+    const outcome = await withTTY(true, () => offerLegacyMigration(async () => 'skip'))
+    expect(outcome).toMatchObject({ offered: true, merged: false })
+    expect(fs.existsSync(CONFIG_DIR)).toBe(false)
+  })
+
+  it('never asks when the new dir already has state', async () => {
+    seedLegacy({ 'settings.json': '{}' })
+    write(path.join(CONFIG_DIR, 'settings.json'), '{}')
+    let asked = false
+    const outcome = await withTTY(true, () => offerLegacyMigration(async () => { asked = true; return 'merge' }))
+    expect(asked).toBe(false)
+    expect(outcome.offered).toBe(false)
+  })
+
+  it('prints the mv hint instead of asking when stdin is not a TTY', async () => {
+    seedLegacy({ 'settings.json': '{}' })
+    const err: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((s) => { err.push(String(s)); return true })
+    let asked = false
+    const outcome = await withTTY(false, () => offerLegacyMigration(async () => { asked = true; return 'merge' }))
+    spy.mockRestore()
+    expect(asked).toBe(false)
+    expect(outcome).toMatchObject({ offered: false, merged: false })
+    expect(err.join('')).toContain(`mv ${LEGACY_CONFIG_DIR} ${CONFIG_DIR}`)
+    expect(fs.existsSync(CONFIG_DIR)).toBe(false)
+  })
+
+  it('localizes the non-TTY notice', async () => {
+    seedLegacy({ 'settings.json': '{}' })
+    const err: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((s) => { err.push(String(s)); return true })
+    setLang('zh')
+    await withTTY(false, () => offerLegacyMigration(async () => 'skip'))
+    setLang('en')
+    spy.mockRestore()
+    expect(err.join('')).toContain('本版本已不再读取')
+  })
+})
+
+describe('reportMergeOutcome', () => {
+  function capture(fn: () => void): string {
+    const out: string[] = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((s) => { out.push(String(s)); return true })
+    try { fn() } finally { spy.mockRestore() }
+    return out.join('')
+  }
+
+  it('reports the counts, and the kept files only when some were skipped', () => {
+    expect(capture(() => reportMergeOutcome({ offered: true, merged: true, result: { files: 3, dirs: 2, skipped: 0 } })))
+      .toContain('Merged 3 file(s) from 2 director(ies)')
+    const kept = capture(() => reportMergeOutcome({ offered: true, merged: true, result: { files: 1, dirs: 1, skipped: 2 } }))
+    expect(kept).toContain('2 existing file(s) kept')
+  })
+
+  it('says nothing when nothing was merged', () => {
+    expect(capture(() => reportMergeOutcome({ offered: true, merged: false }))).toBe('')
   })
 })

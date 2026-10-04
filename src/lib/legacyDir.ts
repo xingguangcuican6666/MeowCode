@@ -15,15 +15,21 @@
 //     this can never nag a user who already migrated (or never had the old dir).
 //   - Non-TTY runs (print mode, pipes, CI) can't be prompted, so they print a
 //     one-line notice and move on — the old dir keeps working as a manual backup.
-//   - The prompt is asked BEFORE the TUI mounts (cli.tsx), which is the only
-//     place raw-mode stdin handling is guaranteed to be safe. Inside a live Ink
-//     session we could not take the terminal back reliably, so an interactive
-//     run that was piped the "already migrated" notice instead skips the prompt.
+//   - The question is asked from an Ink dialog (components/LegacyDirDialog.tsx)
+//     mounted by cli.tsx before the TUI. An earlier version drew the prompt with
+//     readline straight onto stderr; nothing owned the screen then, so the
+//     terminal's own redraw cut the text in half mid-sentence. The dialog also
+//     buys us the mouse and i18n the rest of the UI has.
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import readline from 'node:readline'
 import { CONFIG_DIR } from './configDir'
+import { t } from './i18n'
+
+// The dialog's answer, kept here (rather than in the component) so this module
+// stays the single vocabulary for the migration and the component imports it
+// instead of the other way round — no import cycle.
+export type LegacyChoice = 'merge' | 'skip'
 
 export const LEGACY_CONFIG_DIR = path.join(os.homedir(), '.anycode')
 // Re-exported so tests (and any consumer) can name the destination without
@@ -159,19 +165,6 @@ export function mergeLegacyDir(): MergeResult {
   return res
 }
 
-// Ask on stdin (a single y/n line). Resolves false on EOF or any non-y answer,
-// so a piped/closed stdin degrades to "don't migrate" rather than hanging.
-function askYesNo(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (!process.stdin.isTTY) { resolve(false); return }
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    rl.question(question, (answer) => {
-      rl.close()
-      resolve(/^y(es)?$/i.test(answer.trim()))
-    })
-  })
-}
-
 export interface MigrationOutcome {
   offered: boolean
   merged: boolean
@@ -179,37 +172,36 @@ export interface MigrationOutcome {
   info?: LegacyDirInfo
 }
 
-// The one entry point cli.tsx calls at startup, before anything reads config.
+// Print the merge result on the normal screen (the dialog's alternate buffer is
+// already torn down). Localized through the same catalog the dialog uses, so
+// the module-level `t()` mirror matches the language the user answered in —
+// cli.tsx calls setLang() from the config it read for the dialog.
+export function reportMergeOutcome(outcome: MigrationOutcome): void {
+  if (!outcome.merged || !outcome.result) return
+  const { files, dirs, skipped } = outcome.result
+  process.stdout.write(t('legacy.merged', { files, dirs }) + '\n')
+  if (skipped) process.stdout.write(t('legacy.kept', { n: skipped }) + '\n')
+}
+
+// Ask the migration question. The caller (cli.tsx) owns the UI: it decides
+// whether a TTY dialog is possible and hands us the answer. Splitting it this
+// way keeps this module DOM/Ink-free so the unit tests can drive it directly.
 // Returns quietly when there is nothing to say (no legacy dir, or already
 // migrated) so the common case costs a single stat() per dir.
-export async function offerLegacyMigration(): Promise<MigrationOutcome> {
+export async function offerLegacyMigration(ask: (info: LegacyDirInfo) => Promise<LegacyChoice>): Promise<MigrationOutcome> {
   const info = inspectLegacyDir()
   if (!info) return { offered: false, merged: false }
-  if (!process.stdin.isTTY) {
-    // Can't ask (print mode / pipe / CI): say it once on stderr so the user
-    // learns the old dir is no longer read, and start normally.
-    process.stderr.write(
-      `Note: found config from the old AnyCode era at ${LEGACY_CONFIG_DIR}, which this build no longer reads.\n` +
-      `Migrate it with:  mv ${LEGACY_CONFIG_DIR} ${CONFIG_DIR}\n`,
-    )
-    return { offered: false, merged: false, info }
-  }
-  process.stderr.write(
-    `\n⚠ ${LEGACY_CONFIG_DIR} holds config from when this tool was called AnyCode.\n` +
-    `  That directory is no longer supported and this build reads ${CONFIG_DIR} instead.\n` +
-    `  Found: ${info.present.join(', ') || '(empty)'}\n` +
-    `  Merge it into ${CONFIG_DIR} now? Nothing is deleted — the old directory is left as a backup. [y/N] `,
-  )
-  const yes = await askYesNo('')
-  if (!yes) {
-    process.stderr.write(`  Skipped. Migrate later with:  mv ${LEGACY_CONFIG_DIR} ${CONFIG_DIR}\n\n`)
+  if (process.stdin.isTTY) {
+    const choice = await ask(info)
+    if (choice === 'merge') {
+      const result = mergeLegacyDir()
+      return { offered: true, merged: true, result, info }
+    }
     return { offered: true, merged: false, info }
   }
-  const result = mergeLegacyDir()
-  process.stderr.write(
-    `  Merged ${result.files} file(s) from ${result.dirs} director${result.dirs === 1 ? 'y' : 'ies'}` +
-    (result.skipped ? `; kept ${result.skipped} existing file(s)` : '') +
-    `. The old directory is still there — remove it yourself once you've checked.\n\n`,
-  )
-  return { offered: true, merged: true, result, info }
+  // Can't ask (print mode / pipe / CI): say it once on stderr so the user learns
+  // the old dir is no longer read, and start normally.
+  process.stderr.write(t('legacy.notice', { old: LEGACY_CONFIG_DIR }) + '\n')
+  process.stderr.write(t('legacy.noticeHint', { old: LEGACY_CONFIG_DIR, new: CONFIG_DIR }) + '\n')
+  return { offered: false, merged: false, info }
 }

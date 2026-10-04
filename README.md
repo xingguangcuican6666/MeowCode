@@ -48,8 +48,11 @@ All user state lives in `~/.meowcode/` — `settings.json`, `sessions/`,
 This tool was called **AnyCode** before; its config directory was `~/.anycode`.
 That directory is no longer read. On the next interactive start, if `~/.anycode`
 still holds data and `~/.meowcode` is empty, MeowCode asks whether to merge it
-in. The merge is additive and never deletes the old directory, so you can check
-the result and remove `~/.anycode` yourself. To skip the prompt:
+in — a dialog with the same keys and mouse support as the rest of the UI
+(`↑↓`/wheel to move, `1`–`2` to jump, `↵`/click to confirm, `y`/`n` to answer
+directly, `esc` to skip). The merge is additive and never deletes the old
+directory, so you can check the result and remove `~/.anycode` yourself. To
+skip the prompt:
 
 ```bash
 mv ~/.anycode ~/.meowcode     # or merge by hand

@@ -51,11 +51,16 @@ npm run start       # node dist/cli.js
   `settings.json`, `sessions/`, `memory/` (`MEMORY.md` index), `credentials.json`,
   `history.json`. API keys are **never** written to disk — always env-sourced.
 - The pre-rename `~/.anycode/` is dead: `src/lib/legacyDir.ts` detects it at
-  startup (before config is read, before Ink mounts) and offers an **additive**
-  merge into `~/.meowcode` — nothing is ever deleted from the old dir, existing
-  destination files are never clobbered, and a marker file stops the nagging.
-  Skipped silently once `~/.meowcode` holds any state; non-TTY runs print a
-  one-line `mv` hint instead of prompting.
+  startup (before the entry is resolved, before the TUI mounts) and offers an
+  **additive** merge into `~/.meowcode` — nothing is ever deleted from the old
+  dir, existing destination files are never clobbered, and a marker file stops
+  the nagging. Skipped silently once `~/.meowcode` holds any state; non-TTY runs
+  print a one-line `mv` hint instead of prompting. The question itself is an Ink
+  dialog (`components/LegacyDirDialog.tsx`): cli.tsx mounts it on the alternate
+  screen in the session's own theme/language (keyboard + mouse, same contract as
+  the other pickers), then `reportMergeOutcome` writes the one-line result on the
+  normal screen. `legacyDir.ts` stays Ink-free — `offerLegacyMigration(ask)` takes
+  the answer as a callback, so the unit tests drive it without a terminal.
 - UI language is i18n'd (zh/en/auto) — see `src/lib/i18n.ts`; the codebase has
   substantial Chinese comments and some Chinese UI strings.
 
