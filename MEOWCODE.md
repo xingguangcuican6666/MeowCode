@@ -113,12 +113,29 @@ tui` is refused).
   skips the Ink TUI and spawns the front-end over newline-delimited JSON-RPC
   2.0 stdio (plugin = client, host = server; handshake `initialize` with
   protocol `2025-meowcode-launcher-1`). Host methods: `agent/turn` (+
-  `agent/event` stream), `tools/list`, `tools/call`, `config/get` (no apiKey),
-  `session/state`, `session/reset`. Transcript stays host-side (TUI-identical
-  rows, `/resume`-compatible, autosaved to the shared `sessions/`); turns run
-  `bypassPermissions` with entry `permissions` rules bound. Print mode bypasses
-  the launcher. Lists mark these entries `[launcher]` and the built-in one
-  `[内置]`.
+  `agent/event` stream), `agent/abort` (stop the in-flight turn; `aborted:false`
+  when nothing runs, never an error), `tools/list`, `tools/call`, `config/get`
+  (no apiKey), `session/state`, `session/reset`. Transcript stays host-side
+  (TUI-identical rows, `/resume`-compatible, autosaved to the shared
+  `sessions/`); turns run `bypassPermissions` with entry `permissions` rules
+  bound. Print mode bypasses the launcher. Lists mark these entries `[launcher]`
+  and the built-in one `[内置]`.
+  `src/lib/launcher.test.ts` covers this bridge **against a real child process**
+  (a fixture plugin over a unix socket), because the contract is bytes on a pipe
+  and a mocked ChildProcess would test a fiction.
+- Plugin API gaps (measured, not guessed — plan against them): the host never
+  reports the **session cwd**, so a manifest must declare `"cwd": "."` (a
+  relative cwd reaches `spawn` as written and resolves against the *parent's*,
+  which is what makes that yield the session's own directory); a relative
+  `command`/`args` entry is anchored to the entry dir **only when it names a
+  file there** — the installer's copies live there, and everything else (a PATH
+  command, a flag, the launched program's own argument) passes through
+  untouched; there is **no interactive permission prompt**
+  (`ask` falls through to allow, so a plugin that must gate has to check
+  `tools/call` itself); abort emits **no event**, so a plugin learns the turn
+  ended from `agent/turn` resolving (and the bridge reads lines one at a time —
+  an abort sent before `agent/turn` installed its controller finds nothing to
+  stop); and there is **no `fs/*` method**.
 - Keyboard decoding lives in `src/lib/inkinput.ts` (`decodeInput`), on top of
   `src/lib/keychunks.ts` (`decodeChunk`). Neither of Ink's `useInput` arguments is
   enough alone, and each fails in the opposite direction. `parseKeypress` reports
