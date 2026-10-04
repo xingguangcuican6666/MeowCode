@@ -112,14 +112,14 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
     if (action === 'setDefault') {
       setDefaultEntry(name)
       printRef.current(t('cmd.entryDefaultSet', { name }))
-      setStep('list')
+      backToList()
     } else if (action === 'clearDefault') {
       setDefaultEntry(null)
       printRef.current(t('cmd.entryDefaultCleared'))
-      setStep('list')
+      backToList()
     } else if (action === 'details') {
       printRef.current(details(name, t))
-      setStep('list')
+      backToList()
     } else if (action === 'remove') {
       if (!confirmRef.current) { setConfirm(true); return } // one more ↵, so a
       // stray click on the row can't delete an entry — the list is still there.
@@ -133,10 +133,25 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
         printRef.current(t('entry.removeFailed', { msg }), true)
       }
       setConfirm(false)
-      setEntries(listEntries())
-      setStep('list')
-      setIndex(0)
+      const next = listEntries()
+      setEntries(next)
+      backToList(next)
     }
+  }
+
+  // Coming back to `list`: put the cursor back on the entry we were acting on.
+  // `openActions` has to zero the cursor because the action rows are a different
+  // set, so without this a menu round-trip silently re-targets row 1 — esc would
+  // jump the highlight off the entry you were just managing, and "set as default"
+  // would leave the（默认）mark on a row the cursor isn't on. `list` is the list to
+  // index into, which differs right after a remove.
+  const backToList = (list: EntryMeta[] = entries): void => {
+    setStep('list')
+    setConfirm(false)
+    const i = list.findIndex((e) => e.name === picked)
+    const next = i >= 0 ? i : Math.min(indexRef.current, Math.max(0, list.length - 1))
+    indexRef.current = next
+    setIndex(next)
   }
 
   const rows = rowsFor()
@@ -172,7 +187,7 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
   useInput((input, key) => {
     decodeInput({ input, key }, {
       onEscape: () => {
-        if (step === 'actions') { setStep('list'); setConfirm(false); return }
+        if (step === 'actions') { backToList(); return }
         onCancelRef.current()
       },
       onUp: () => move(-1),
