@@ -72,16 +72,21 @@ first start.
 ```bash
 meowcode                     # start the default entry, or the built-in tui
 meowcode tui                 # ...explicitly, the built-in terminal UI
-meowcode work                # start a specific entry (argv shorthand)
-meowcode --entry work        # same, as an explicit flag
-meowcode entry new work      # create one (writes its entry.json manifest)
-meowcode entry use work      # make it the default (~/.meowcode/entry.json)
+meowcode meowui              # start a specific entry (argv shorthand)
+meowcode --entry meowui      # same, as an explicit flag
+meowcode entry install <pkg> # install one (the only way an entry appears)
+meowcode entry use meowui    # make it the default (~/.meowcode/entry.json)
 ```
 
-`/entry` opens an interactive menu — pick an entry, then set it as the startup
-default, show its details, or remove it. The subcommands stay for scripting:
-`/entry list`, `/entry current`, `/entry new <name>`, `/entry default [name|off]`,
+`/entry` opens an interactive menu over the installed set — pick an entry, then
+set it as the startup default, show its details, or remove it. The subcommands
+stay for scripting: `/entry list`, `/entry current`, `/entry default [name|off]`,
 `/entry remove <name> [--force]`.
+
+An entry cannot be hand-authored, and there is no "new entry" anywhere in the UI:
+the list is a readout of what you have installed, because what you *can* install is
+decided by the plugins you have. `meowcode entry install <source>` is the only way
+one appears, and `entry new` refuses with that pointer.
 
 Entries bind at startup (no hot-switching), so every message says a restart is
 needed. Sessions and memory are **shared** across entries — switching front-ends

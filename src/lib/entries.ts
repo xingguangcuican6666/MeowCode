@@ -9,10 +9,12 @@
 //
 // An entry is NOT a user profile: it is a completely separate UI + wiring
 // (think "the same agent, driven through a different front-end"), not a
-// per-person slice of config. The built-in terminal UI is itself an entry, named
-// `tui`, materialized on first startup. Conversation state — sessions/, memory/
-// (incl. projects/) and history.json — is SHARED across all entries and lives at
-// the CONFIG_DIR root; see stateDir below.
+// per-person slice of config. Nor is it something the user authors — an entry
+// exists because a plugin shipped one and `meowcode entry install` materialized
+// it, so the entry list is exactly the installed set. The built-in terminal UI is
+// itself an entry, named `tui`, materialized on first startup. Conversation
+// state — sessions/, memory/ (incl. projects/) and history.json — is SHARED
+// across all entries and live at the CONFIG_DIR root; see stateDir below.
 //
 // Config layering (lowest → highest precedence):
 //   hardcoded defaults → global ~/.meowcode/settings.json → entry settings.json
@@ -334,8 +336,9 @@ export function entryAwareSaveConfig(cfg: AppConfig): void {
 
 // --- Entry creation ---------------------------------------------------------
 
-// Template for /entry new and the installer: manifest fields plus initial
-// content files for the skills/commands/agents dirs.
+// Template for the installer: manifest fields plus initial content files for
+// the skills/commands/agents dirs. There is no way to reach this from the UI —
+// an entry exists because a plugin shipped one (see createEntry's caller).
 export interface EntryTemplate {
   description?: string
   settings?: Record<string, boolean | string | number>
@@ -367,9 +370,11 @@ function writeIfAbsent(file: string, content: string): void {
   }
 }
 
+// Materialize an entry from an install template. This is the installer's job
+// alone: an entry is a complete front-end shipped by a plugin, so nothing in the
+// UI may call this — `/entry new` and `meowcode entry new` both refuse. The
+// built-in TUI entry is materialized at startup and never installed over.
 export function createEntry(name: string, template?: EntryTemplate): void {
-  // The built-in TUI entry is materialized at startup, never created by hand —
-  // `/entry new tui` would otherwise silently reset a user's tui settings.
   if (name === BUILTIN_ENTRY) throw new Error(`'${BUILTIN_ENTRY}' is the built-in entry and cannot be created`)
   const dir = entryDir(name) // throws on invalid name
   fs.mkdirSync(dir, { recursive: true })

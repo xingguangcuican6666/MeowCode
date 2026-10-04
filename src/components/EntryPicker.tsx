@@ -5,16 +5,7 @@ import { decodeInput } from '../lib/inkinput'
 import { useTheme } from '../theme'
 import { useT } from '../lib/i18n'
 import { truncateToWidth } from '../lib/text'
-import {
-  BUILTIN_ENTRY,
-  createEntry,
-  entryExists,
-  getDefaultEntry,
-  isValidEntryName,
-  listEntries,
-  setDefaultEntry,
-  type EntryMeta,
-} from '../lib/entries'
+import { getDefaultEntry, listEntries, setDefaultEntry, type EntryMeta } from '../lib/entries'
 import { EntryInstallError, removeEntry } from '../lib/entryInstall'
 
 const PAD = 1
@@ -26,17 +17,22 @@ interface Props {
   onCancel: () => void
 }
 
-// The three states this overlay lives in. One component, one mount: `list` picks
-// an entry, `actions` operates on it, `new` types a name for a fresh one. Esc
-// walks back up this ladder and then closes.
-type Step = 'list' | 'actions' | 'new'
+// The two states this overlay lives in. One component, one mount: `list` picks an
+// entry, `actions` operates on it. Esc walks back up that ladder and then closes.
+//
+// There is deliberately NO "create" step: an entry is a whole front-end shipped
+// by a plugin, not something the user types into existence. What you can install
+// is decided by what plugins you have, so the list is a readout of the installed
+// set — offering to hand-author one would invent an entry with no UI behind it.
+// `meowcode entry install <source>` is the only way an entry appears.
+type Step = 'list' | 'actions'
 
 type Action = 'setDefault' | 'clearDefault' | 'details' | 'remove'
 
 // Row kinds in the two list-shaped steps, so the render and the mouse hit-test
 // read off one array instead of two parallel ones that can drift.
 interface Row {
-  kind: 'entry' | 'create' | 'action'
+  kind: 'entry' | 'action'
   entry?: EntryMeta
   action?: Action
 }
@@ -63,16 +59,14 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
   const t = useT()
   const { stdin } = useStdin()
 
-  // Re-read the list each time we come back to `list`, so a create/remove inside
-  // the menu is visible without remounting the overlay.
+  // Re-read the list each time we come back to `list`, so a remove inside the
+  // menu is visible without remounting the overlay.
   const [step, setStep] = useState<Step>('list')
   const [entries, setEntries] = useState<EntryMeta[]>(() => listEntries())
   const [index, setIndex] = useState(0)
   // Which entry `actions` is acting on — captured on the way in, so esc back to
   // the list can still highlight it.
   const [picked, setPicked] = useState<string | null>(null)
-  const [draft, setDraft] = useState('')
-  const [error, setError] = useState('')
   // Which row is being removed — the destructive action gets one more ↵.
   const [confirm, setConfirm] = useState(false)
   const onCancelRef = useRef(onCancel); onCancelRef.current = onCancel
@@ -80,7 +74,7 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
 
   // Read from a ref, not from `index`: Ink hands useInput one whole read chunk,
   // so a setIndex earlier in the same chunk has not re-rendered by the time ↵ is
-  // read (see lib/keychunks). Every cursor move writes both.
+  // read (see lib/inkinput). Every cursor move writes both.
   const indexRef = useRef(index); indexRef.current = index
   const confirmRef = useRef(confirm); confirmRef.current = confirm
 
@@ -93,12 +87,10 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
     setPicked(name)
     setIndex(0)
     setConfirm(false)
-    setError('')
     setStep('actions')
   }
 
   const rowsFor = (): Row[] => {
-    if (step === 'new') return []
     if (step === 'actions') {
       const rows: Row[] = []
       // Making the current default the default again would be a no-op, so the
@@ -110,7 +102,7 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
       if (!pickedEntry?.builtin) rows.push({ kind: 'action', entry: pickedEntry, action: 'remove' })
       return rows
     }
-    return [...entries.map((e): Row => ({ kind: 'entry', entry: e })), { kind: 'create' }]
+    return entries.map((e): Row => ({ kind: 'entry', entry: e }))
   }
 
   const runAction = (row: Row | undefined): void => {
@@ -147,25 +139,9 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
     }
   }
 
-  const confirmNew = (): void => {
-    const name = draft.trim()
-    if (!name) { setError(t('entry.newInvalid', { name })); return }
-    if (name === BUILTIN_ENTRY) { setError(t('entry.newReserved', { name })); return }
-    if (!isValidEntryName(name)) { setError(t('entry.newInvalid', { name })); return }
-    if (entryExists(name)) { setError(t('entry.newTaken', { name })); return }
-    createEntry(name)
-    printRef.current(t('cmd.entryCreated', { name }))
-    setDraft('')
-    setError('')
-    setEntries(listEntries())
-    setStep('list')
-    // Land on the row we just made, so a follow-up ↵ manages it.
-    setIndex(Math.max(0, listEntries().length))
-  }
-
   const rows = rowsFor()
   const rowCount = rows.length
-  // Clamp rather than modulo-scroll on the list steps: a 2-entry list that
+  // Clamp rather than modulo-scroll on the list step: a 2-entry list that
   // wrap-arrows is disorienting when the list can grow. (The action list is
   // fixed-length, so it wraps freely.)
   const move = (delta: number): void => {
@@ -182,10 +158,8 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
     setIndex(i)
   }
   const activate = (): void => {
-    if (step === 'new') { confirmNew(); return }
     const row = rows[indexRef.current]
     if (!row) return
-    if (row.kind === 'create') { setDraft(''); setError(''); setStep('new'); return }
     if (row.kind === 'entry' && row.entry) { openActions(row.entry.name); return }
     runAction(row)
   }
@@ -196,15 +170,6 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
   // while a plain "↑" arrives as input="" (key.upArrow true). decodeInput takes
   // both of Ink's arguments and gets each of those right.
   useInput((input, key) => {
-    if (step === 'new') {
-      decodeInput({ input, key }, {
-        onEscape: () => { setDraft(''); setError(''); setStep('list') },
-        onBackspace: () => setDraft((d) => d.slice(0, -1)),
-        onReturn: () => activate(),
-        onChar: (ch) => { if (/\s/.test(ch)) return; setError(''); setDraft((d) => d + ch) },
-      })
-      return
-    }
     decodeInput({ input, key }, {
       onEscape: () => {
         if (step === 'actions') { setStep('list'); setConfirm(false); return }
@@ -269,7 +234,6 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
   // name is truncated to whatever room the marks leave, so a "（默认）[launcher]"
   // row never pushes the entry's own name off the edge.
   const labels = rows.map((r) => {
-    if (r.kind === 'create') return t('entry.create')
     if (r.kind === 'entry' && r.entry) return truncateToWidth(r.entry.name, Math.max(8, Math.floor(inner * 0.5) - 1)) + '  ' + marks(r.entry, defaultsTo(r.entry.name), t)
     return actionLabel(r.action as Action, t)
   })
@@ -292,16 +256,7 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
           <Text> </Text>
         </>
       )}
-      {step === 'new' && (
-        <>
-          <Text bold color={colors.accent} wrap="truncate">{t('entry.newTitle')}</Text>
-          <Text color={colors.dim} wrap="truncate">{truncateToWidth(t('entry.newPrompt'), inner)}</Text>
-          <Text> </Text>
-          <Text wrap="truncate">{'> '}{truncateToWidth(draft, inner - 4)}<Text color={colors.accentBright}>▏</Text></Text>
-          {error ? <Text color={colors.error ?? colors.warning} wrap="truncate">{truncateToWidth(error, inner)}</Text> : <Text> </Text>}
-        </>
-      )}
-      {step !== 'new' && rows.map((r, i) => {
+      {rows.map((r, i) => {
         const cursor = i === index
         const label = labels[i]
         const dim = r.kind !== 'entry'
@@ -309,9 +264,9 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
         // one row per item keeps the mouse geometry exact, and the detail is only
         // missed by the arrow keys, which land you on that row anyway.
         const desc = cursor && r.kind === 'entry' && r.entry?.description ? `  ${r.entry.description}` : ''
-        const text = `${cursor ? '❯ ' : '  '}${r.kind === 'create' ? '' : `${i + 1}. `}${label}${desc}`
+        const text = `${cursor ? '❯ ' : '  '}${i + 1}. ${label}${desc}`
         return (
-          <Box key={r.kind === 'create' ? 'create' : r.kind === 'entry' ? r.entry?.name : r.action} width={width}>
+          <Box key={r.kind === 'entry' ? r.entry?.name : r.action} width={width}>
             <Text color={cursor ? colors.accentBright : dim ? colors.dim : colors.text} bold={cursor} wrap="truncate">
               {truncateToWidth(text, inner)}
             </Text>
@@ -324,7 +279,7 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
         </Text>
       )}
       <Text> </Text>
-      <Text color={colors.dim} wrap="truncate">{truncateToWidth(t(step === 'list' ? 'entry.listFooter' : step === 'actions' ? 'entry.actionsFooter' : 'entry.newFooter'), inner)}</Text>
+      <Text color={colors.dim} wrap="truncate">{truncateToWidth(t(step === 'list' ? 'entry.listFooter' : 'entry.actionsFooter'), inner)}</Text>
     </Box>
   )
 }

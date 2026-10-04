@@ -67,10 +67,12 @@ npm run start       # node dist/cli.js
 ### Entries (front-ends)
 
 `src/lib/entries.ts` — an entry is a **complete front-end of its own** (its own
-UI and wiring, driven by the same agent), NOT a per-user profile. The built-in
-terminal UI is itself an entry, `tui` (`BUILTIN_ENTRY`), materialized as
-`~/.meowcode/entries/tui/` by `materializeBuiltinEntry()` at startup (idempotent,
-never clobbers; `/entry new tui` and `entry remove tui` are refused).
+UI and wiring, driven by the same agent), NOT a per-user profile, and NOT
+something the user types into existence: entries exist because a plugin shipped
+one and it was installed. The built-in terminal UI is itself an entry, `tui`
+(`BUILTIN_ENTRY`), materialized as `~/.meowcode/entries/tui/` by
+`materializeBuiltinEntry()` at startup (idempotent, never clobbers; `entry remove
+tui` is refused).
 
 - Per entry: `entry.json` (manifest + overrides), `settings.json` (config saved
   while active), content (`skills/ commands/ agents/`).
@@ -95,10 +97,14 @@ never clobbers; `/entry new tui` and `entry remove tui` are refused).
   `meowcode entry remove <name>` deletes (refuses `tui`, and refuses
   per-entry `sessions/`/`memory/` without `--force`). `createEntry` never
   overwrites files.
+- **An entry cannot be created by hand.** It is a whole front-end shipped by a
+  plugin, so `createEntry` is the installer's alone: `/entry new` and
+  `meowcode entry new` both refuse with a pointer to `entry install`, and the
+  menu has no "new entry" row. The list is a readout of the installed set.
 - `/entry` bare opens the interactive menu (`components/EntryPicker.tsx`: list →
-  actions → new-name, keyboard + mouse); the subcommands (`/entry list|current|
-  new|default|remove`) stay for scripts and non-TTY runs, where bare `/entry`
-  prints the list instead.
+  actions, keyboard + mouse); the subcommands (`/entry list|current|default|
+  remove`) stay for scripts and non-TTY runs, where bare `/entry` prints the
+  list instead.
 - Has-entry plugins (`src/lib/launcher.ts`): an entry's `entry.json` may declare
   `"launcher": { "command", "args?", "cwd?", "env?" }`; when active the CLI
   skips the Ink TUI and spawns the front-end over newline-delimited JSON-RPC
@@ -114,7 +120,7 @@ never clobbers; `/entry new tui` and `entry remove tui` are refused).
   `src/lib/keychunks.ts` (`decodeChunk`). Neither of Ink's `useInput` arguments is
   enough alone, and each fails in the opposite direction. `parseKeypress` reports
   ONE keypress per stdin read, so `key` loses everything after the first key of a
-  batch (a fast "2⏎" loses the ⏎; "[B" loses the ⏎). But use-input.js
+  batch (a fast "2⏎" loses the ⏎; "↓⏎" loses the ⏎). But use-input.js
   blanks `input` for every key it can *name* (up/down/pageup/pagedown/home/end/
   delete/escape), so a plain arrow arrives as `input === ''` and the bytes never
   reach a `decodeChunk`-only callback. `decodeInput({ input, key }, handlers)`

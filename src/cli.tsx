@@ -21,7 +21,7 @@ import { ALT_ON, ALT_OFF, MOUSE_ON, MOUSE_OFF, CLEAR } from './lib/termmodes'
 // the one-line result (or the error) and exits — nothing throws past main().
 import { EntryInstallError, entryInstallCommand } from './lib/entryInstall'
 import {
-  activateEntry, activeEntry, createEntry, entryDir, entryExists, getDefaultEntry,
+  activateEntry, activeEntry, entryExists, getDefaultEntry,
   listEntries, materializeBuiltinEntry, setDefaultEntry, activeEntryName,
 } from './lib/entries'
 import { readLauncherConfig, runLauncher } from './lib/launcher'
@@ -299,13 +299,13 @@ function runEntryCommand(args: string[]): void {
     return
   }
   if (sub === 'new' || sub === 'create') {
-    const name = args[1]
-    if (!name) { process.stderr.write('Usage: meowcode entry new <name> [--description "..."]\n'); process.exit(1) }
-    const di = args.findIndex((a) => a === '--description' || a === '-d')
-    const description = di >= 0 && args[di + 1] && !args[di + 1].startsWith('-') ? args[di + 1] : undefined
-    try { createEntry(name, { description }) } catch (err) { process.stderr.write(`Error: ${String((err as Error)?.message ?? err)}\n`); process.exit(1) }
-    process.stdout.write(`Entry '${name}' created at ${entryDir(name)}\n`)
-    return
+    // An entry is a complete front-end shipped by a plugin — hand-authoring one
+    // would leave an entry with no UI behind it. Installing is the only way in.
+    process.stderr.write(
+      'Error: entries cannot be created by hand — they are front-ends shipped by plugins.\n' +
+      'Install one instead: meowcode entry install <npm-package | git-url | ./dir>\n',
+    )
+    process.exit(1)
   }
   if (sub === 'use' || sub === 'default') {
     // `meowcode entry default` prints the current default; `entry default off`
@@ -337,7 +337,7 @@ function runEntryCommand(args: string[]): void {
     }
     return
   }
-  process.stderr.write(`Usage: meowcode entry list|new <name>|use <name>|default [off]|install <spec>|remove <name>\n`)
+  process.stderr.write(`Usage: meowcode entry list|install <source>|use <name>|default [off]|remove <name>\n`)
   process.exit(1)
 }
 

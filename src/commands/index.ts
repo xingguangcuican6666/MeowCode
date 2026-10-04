@@ -26,7 +26,7 @@ import { loadAgents } from '../lib/agents'
 import { subagentTypeNames } from '../tools/orchestration'
 import { availableUpdate, type UpdateChannel } from '../lib/update'
 import { CONFIG_FILE } from '../config'
-import { listEntries, isValidEntryName, entryExists, getDefaultEntry, setDefaultEntry, activeEntry, activeEntryName, createEntry, readEntryOverrides, isLauncherDecl } from '../lib/entries'
+import { listEntries, isValidEntryName, entryExists, getDefaultEntry, setDefaultEntry, activeEntry, activeEntryName, readEntryOverrides, isLauncherDecl } from '../lib/entries'
 import { removeEntry, EntryInstallError } from '../lib/entryInstall'
 import os from 'node:os'
 import path from 'node:path'
@@ -1286,8 +1286,11 @@ const chrome: SlashCommand = {
 // the TUI entirely), NOT a per-user profile; the built-in TUI is itself the entry
 // `tui`. Sessions and memory are shared across entries.
 // Management only: an entry binds at startup (--entry / positional / default), so
-// this lists, creates, and edits the default pointer but never switches the
-// active entry — changing that needs a restart, which every message says.
+// this lists, picks the default pointer and removes, but never switches the active
+// entry — changing that needs a restart, which every message says.
+// An entry cannot be hand-authored: it is a complete front-end shipped by a plugin,
+// so the installed set decides what exists. `entry new`/`entry create` therefore
+// refuse and point at the installer.
 // Bare `/entry` opens the interactive menu when the host can mount one (the
 // CommandContext hook); every subcommand below stays for scripts and non-TTY runs,
 // where printList() is the fallback. Remove reuses the installer's removeEntry so
@@ -1329,12 +1332,7 @@ const entry: SlashCommand = {
     }
 
     if (verb === 'new' || verb === 'create') {
-      const [name, ...descParts] = rest.split(/\s+/)
-      if (!name) { ctx.print(t('cmd.entryNewUsage'), 'system', { error: true }); return }
-      if (!isValidEntryName(name)) { ctx.print(t('cmd.entryInvalidName', { name }), 'system', { error: true }); return }
-      if (entryExists(name)) { ctx.print(t('cmd.entryExists', { name }), 'system', { error: true }); return }
-      createEntry(name, { description: descParts.length ? descParts.join(' ') : undefined })
-      ctx.print(t('cmd.entryCreated', { name }), 'system')
+      ctx.print(t('cmd.entryNewRefused'), 'system', { error: true })
       return
     }
 
