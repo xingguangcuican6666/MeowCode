@@ -61,25 +61,41 @@ mv ~/.anycode ~/.meowcode     # or merge by hand
 Non-interactive runs (print mode, pipes, CI) print a one-line notice with the
 same `mv` hint instead of prompting.
 
-## Entries (profiles)
+## Entries (front-ends)
 
-Entries are dsh-style profiles: self-contained directories under
-`~/.meowcode/entries/<name>/`, each with its own config, sessions, memory, and
-content. Switching entry switches all of them at once — handy for separating
-work / personal / experiments.
-
-Quick start:
+An entry is a **complete front-end of its own** — its own UI and wiring, driven
+by the same agent — not a per-user profile. A plugin can ship one that replaces
+the whole terminal UI (a web front-end, a tray app); the built-in terminal UI is
+itself just an entry, named `tui`, materialized as `~/.meowcode/entries/tui/` on
+first start.
 
 ```bash
-meowcode entry new work    # create an entry (writes its entry.json manifest)
-meowcode entry use work    # make it the default (recorded in ~/.meowcode/entry.json)
-meowcode                   # start in the default entry
-meowcode work             # ...or start a specific entry directly
-meowcode --entry work     # same, as an explicit flag
+meowcode                     # start the default entry, or the built-in tui
+meowcode tui                 # ...explicitly, the built-in terminal UI
+meowcode work                # start a specific entry (argv shorthand)
+meowcode --entry work        # same, as an explicit flag
+meowcode entry new work      # create one (writes its entry.json manifest)
+meowcode entry use work      # make it the default (~/.meowcode/entry.json)
 ```
 
-`/entry` inside a session lists entries and sets the default; restart to switch
-(entries are chosen once at startup — no hot-switching).
+`/entry` opens an interactive menu — pick an entry, then set it as the startup
+default, show its details, or remove it. The subcommands stay for scripting:
+`/entry list`, `/entry current`, `/entry new <name>`, `/entry default [name|off]`,
+`/entry remove <name> [--force]`.
+
+Entries bind at startup (no hot-switching), so every message says a restart is
+needed. Sessions and memory are **shared** across entries — switching front-ends
+does not fork your history.
+
+```
+~/.meowcode/
+  settings.json                 ← global base config
+  sessions/  memory/  projects/ history.json   ← shared by every entry
+  entry.json                    ← { "default": "<name>" }; absent ⇒ tui
+  entries/
+    tui/    entry.json  settings.json          ← built-in, materialized at startup
+    meowui/ entry.json  settings.json  skills/ commands/ agents/
+```
 
 Each entry dir holds:
 
@@ -89,8 +105,6 @@ Each entry dir holds:
 - `settings.json` — the entry's saved config. Layering, low → high: built-in
   defaults → global `~/.meowcode/settings.json` → entry `settings.json` →
   entry `entry.json`.
-- `sessions/`, `memory/`, `projects/`, `mailbox/`, `history.json` — per-entry
-  state; resource lookup goes entry → global → project.
 - `skills/`, `commands/`, `agents/` — per-entry content, same lookup order.
 
 Credentials, usage stats, and the update cache stay machine-global. The API key
@@ -117,7 +131,7 @@ keeps your local edits.
   "name": "my-meowcode-entry",
   "meowcode": {
     "entry": {
-      "description": "Team agent profile",
+      "description": "A Web front-end for the same agent",
       "model": "claude-opus-4-8",
       "settings": { "effort": "high" },
       "content": {
@@ -136,8 +150,8 @@ Most entries are just config + content for the normal TUI. An entry can also
 change *how MeowCode starts*: its `entry.json` may declare a `launcher`
 front-end (e.g. a web UI). When that entry is active, `meowcode` skips the Ink
 TUI entirely and spawns the launcher instead — the plugin drives the agent
-through a JSON-RPC bridge, while the transcript still lands in the entry's
-`sessions/` (`/resume`-compatible).
+through a JSON-RPC bridge, and the transcript lands in the shared `sessions/`
+(`/resume`-compatible, same as in the TUI).
 
 The plugin is the JSON-RPC **client** and MeowCode the **server**, over the
 child's stdin/stdout (newline-delimited JSON-RPC 2.0 — same framing as MCP

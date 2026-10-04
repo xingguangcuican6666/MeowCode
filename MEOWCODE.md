@@ -64,28 +64,41 @@ npm run start       # node dist/cli.js
 - UI language is i18n'd (zh/en/auto) — see `src/lib/i18n.ts`; the codebase has
   substantial Chinese comments and some Chinese UI strings.
 
-### Entries (profiles)
+### Entries (front-ends)
 
-`src/lib/entries.ts` — dsh-style profiles: self-contained dirs under
-`~/.meowcode/entries/<name>/`.
+`src/lib/entries.ts` — an entry is a **complete front-end of its own** (its own
+UI and wiring, driven by the same agent), NOT a per-user profile. The built-in
+terminal UI is itself an entry, `tui` (`BUILTIN_ENTRY`), materialized as
+`~/.meowcode/entries/tui/` by `materializeBuiltinEntry()` at startup (idempotent,
+never clobbers; `/entry new tui` and `entry remove tui` are refused).
 
 - Per entry: `entry.json` (manifest + overrides), `settings.json` (config saved
-  while active), state (`sessions/ memory/ projects/ mailbox/ history.json`),
-  content (`skills/ commands/ agents/`).
+  while active), content (`skills/ commands/ agents/`).
+- **Shared by every entry** (at the `~/.meowcode` root, NOT under the entry):
+  `sessions/`, `memory/` (incl. `projects/`), `history.json`, `mailbox/`,
+  `memory.json`. An entry swaps the surface, never the history — so
+  `stateDir()`/`stateFile()` ignore the active entry.
 - Chosen once at CLI startup: `--entry <name>` → `meowcode <name>` shorthand →
-  default in `~/.meowcode/entry.json` (`{ "default": name }`). **No hot-switch** —
-  restart to change entries; in-session `/entry` only lists/sets the default.
+  default in `~/.meowcode/entry.json` (`{ "default": name }`) → else `tui`.
+  **No hot-switch** — restart to change entries. With no entry explicitly active,
+  behavior is byte-identical to global mode: `tui`'s own files ARE the global ones.
 - Config layering (low → high): defaults → global `settings.json` → entry
   `settings.json` → `entry.json` overrides (`applyEntryOverrides`, called from
   `loadConfig`). `settings` bag merges key-by-key; bag keys (hooks/mcpServers/
   permissions/customProviders) replace whole when `entry.json` carries them.
-- Resources resolve **entry → global → project** via `stateDir()`/`stateFile()`.
+- Content resources resolve **entry → global → project**.
 - Machine-global (never per-entry): `credentials.json`, usage stats, update
   cache. API key is always env-sourced, never from entry files.
 - Config persistence goes through `entryAwareSaveConfig` (global mode → plain
   `saveConfig`). Installer: `meowcode entry install <npm pkg | git url | local
   path>` reads the `meowcode.entry` template field from the package manifest;
-  `meowcode entry remove <name>` deletes. `createEntry` never overwrites files.
+  `meowcode entry remove <name>` deletes (refuses `tui`, and refuses
+  per-entry `sessions/`/`memory/` without `--force`). `createEntry` never
+  overwrites files.
+- `/entry` bare opens the interactive menu (`components/EntryPicker.tsx`: list →
+  actions → new-name, keyboard + mouse); the subcommands (`/entry list|current|
+  new|default|remove`) stay for scripts and non-TTY runs, where bare `/entry`
+  prints the list instead.
 - Has-entry plugins (`src/lib/launcher.ts`): an entry's `entry.json` may declare
   `"launcher": { "command", "args?", "cwd?", "env?" }`; when active the CLI
   skips the Ink TUI and spawns the front-end over newline-delimited JSON-RPC
@@ -93,11 +106,21 @@ npm run start       # node dist/cli.js
   protocol `2025-meowcode-launcher-1`). Host methods: `agent/turn` (+
   `agent/event` stream), `tools/list`, `tools/call`, `config/get` (no apiKey),
   `session/state`, `session/reset`. Transcript stays host-side (TUI-identical
-  rows, `/resume`-compatible, autosaved to the entry's `sessions/`); turns run
+  rows, `/resume`-compatible, autosaved to the shared `sessions/`); turns run
   `bypassPermissions` with entry `permissions` rules bound. Print mode bypasses
-  the launcher. Lists mark these entries `[launcher]`.
-- With no entry active (`entryActive() === false`) behavior is byte-identical to
-  pre-entries global mode — keep it that way.
+  the launcher. Lists mark these entries `[launcher]` and the built-in one
+  `[内置]`.
+- Keyboard decoding lives in `src/lib/inkinput.ts` (`decodeInput`), on top of
+  `src/lib/keychunks.ts` (`decodeChunk`). Neither of Ink's `useInput` arguments is
+  enough alone, and each fails in the opposite direction. `parseKeypress` reports
+  ONE keypress per stdin read, so `key` loses everything after the first key of a
+  batch (a fast "2⏎" loses the ⏎; "[B" loses the ⏎). But use-input.js
+  blanks `input` for every key it can *name* (up/down/pageup/pagedown/home/end/
+  delete/escape), so a plain arrow arrives as `input === ''` and the bytes never
+  reach a `decodeChunk`-only callback. `decodeInput({ input, key }, handlers)`
+  walks the chunk and consults the flags only when the chunk carried no
+  characters — never both, or a batch double-counts its first key. Pass Ink's two
+  arguments straight into it; read it before adding a new picker.
 
 ## Architecture
 

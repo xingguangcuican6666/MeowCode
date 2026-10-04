@@ -82,6 +82,10 @@ export interface ChatActions {
   forkCurrent?: () => string | null
   openAutoCompact?: () => void
   openEffortPicker?: () => void
+  // The interactive /entry menu: list entries, then act on one (set/clear the
+  // startup default, show details, remove). The /entry subcommands stay for
+  // scripts and non-interactive runs.
+  openEntryMenu?: () => void
   // Open the last assistant response in $EDITOR (the `lastResponseInEditor`
   // setting). Absent = no external-editor host (print mode).
   openEditor?: (text: string) => void
@@ -349,6 +353,7 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
         forkCurrent: actions.forkCurrent,
         openAutoCompact: actions.openAutoCompact,
         openEffortPicker: actions.openEffortPicker,
+        openEntryMenu: actions.openEntryMenu,
         openEditor: actions.openEditor,
       })
       return

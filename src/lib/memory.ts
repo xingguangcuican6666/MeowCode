@@ -13,7 +13,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { parseFrontmatter } from './frontmatter'
-import { activeEntry, stateDir } from './entries'
+import { stateDir } from './entries'
 
 // --- The standing loop goal (unchanged storage, so /goal + the judge keep working). ---
 export interface GoalStore {
@@ -21,11 +21,10 @@ export interface GoalStore {
   updatedAt: string
 }
 
-// The goal store's file, resolved at CALL time so it follows the active entry:
-// ~/.meowcode/memory.json in global mode (the legacy path, byte-for-byte), or
-// <entry>/memory.json when one is active.
+// The goal store's file. Shared across every entry, like sessions and memory —
+// an entry swaps the front-end, not what you and the agent have been working on.
 function memoryFile(): string {
-  return activeEntry() ? path.join(activeEntry()!.dir, 'memory.json') : path.join(os.homedir(), '.meowcode', 'memory.json')
+  return path.join(os.homedir(), '.meowcode', 'memory.json')
 }
 
 export function loadMemory(): GoalStore {

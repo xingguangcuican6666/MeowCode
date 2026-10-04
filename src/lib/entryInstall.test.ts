@@ -25,7 +25,14 @@ vi.mock('node:os', async (importOriginal) => {
 })
 
 import { ENTRIES_DIR } from './entries'
-import { entryExists, getDefaultEntry, setDefaultEntry, activateEntry } from './entries'
+import {
+  BUILTIN_ENTRY,
+  entryExists,
+  getDefaultEntry,
+  materializeBuiltinEntry,
+  setDefaultEntry,
+  activateEntry,
+} from './entries'
 import { installEntry, removeEntry, EntryInstallError } from './entryInstall'
 
 // Build a local-dir install source: package.json carrying the meowcode.entry
@@ -131,5 +138,21 @@ describe('removeEntry', () => {
     setDefaultEntry('scope-def')
     removeEntry('scope-def', { force: true })
     expect(getDefaultEntry()).toBeNull()
+  })
+
+  // The built-in entry is materialized on every startup, so removing it would
+  // only make it reappear — and it is the one entry the user must not be able
+  // to delete by accident (or with --force).
+  it('refuses to remove the built-in tui entry, even with --force', () => {
+    materializeBuiltinEntry()
+    expect(() => removeEntry(BUILTIN_ENTRY, { force: true })).toThrow(EntryInstallError)
+    expect(entryExists(BUILTIN_ENTRY)).toBe(true)
+  })
+
+  it('removing the default built-in entry clears nothing — it refuses first', () => {
+    materializeBuiltinEntry()
+    setDefaultEntry(BUILTIN_ENTRY)
+    expect(() => removeEntry(BUILTIN_ENTRY)).toThrow(EntryInstallError)
+    expect(getDefaultEntry()).toBe(BUILTIN_ENTRY)
   })
 })

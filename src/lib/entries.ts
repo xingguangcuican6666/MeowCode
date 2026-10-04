@@ -1,18 +1,24 @@
-// Entries — dsh-style profiles for meowcode. An "entry" is a self-contained
-// profile directory under ~/.meowcode/entries/<name>/ holding its own config
-// overrides (entry.json), persisted full config (settings.json — written by
-// saveConfig while the entry is active), per-entry state (sessions/, memory/,
-// projects/, history.json, mailbox/) and content dirs (skills/, commands/,
-// agents/). ~/.meowcode/entry.json names the default entry activated at startup
-// (overridable with --entry <name>); when absent, meowcode behaves exactly as
-// before ("global mode").
+// Entries — the front-ends and wiring meowcode can start under. An "entry" is a
+// self-contained directory under ~/.meowcode/entries/<name>/ holding its own
+// config overrides (entry.json), persisted full config (settings.json — written
+// by saveConfig while the entry is active) and content dirs (skills/, commands/,
+// agents/), optionally a `launcher` that replaces the whole UI (see
+// lib/launcher). ~/.meowcode/entry.json names the default entry activated at
+// startup (overridable with --entry <name>); with no default we start the
+// built-in `tui` entry.
+//
+// An entry is NOT a user profile: it is a completely separate UI + wiring
+// (think "the same agent, driven through a different front-end"), not a
+// per-person slice of config. The built-in terminal UI is itself an entry, named
+// `tui`, materialized on first startup. Conversation state — sessions/, memory/
+// (incl. projects/) and history.json — is SHARED across all entries and lives at
+// the CONFIG_DIR root; see stateDir below.
 //
 // Config layering (lowest → highest precedence):
 //   hardcoded defaults → global ~/.meowcode/settings.json → entry settings.json
 //   → entry.json overrides. The settings bag merges key-by-key at each layer.
-// Resources resolve entry → global → project (handled by the owning modules via
-// the path helpers below). The API key is always env-sourced and never read
-// from (or written to) entry files.
+// The API key is always env-sourced and never read from (or written to) entry
+// files.
 import path from 'node:path'
 import fs from 'node:fs'
 // CONFIG_DIR comes from lib/configDir (not ../config) so this module never
@@ -29,19 +35,29 @@ export const ENTRIES_DIR = path.join(CONFIG_DIR, 'entries')
 // without picking a side in the config↔entries cycle.
 export { CONFIG_DIR }
 
+// The built-in terminal UI, as an ordinary entry. Materialized on first startup
+// so it lists, can be made the default, and can even get its own settings.json —
+// but it is never created, removed or overwritten by the user-facing commands.
+export const BUILTIN_ENTRY = 'tui'
+
 export interface EntryMeta {
   name: string
   description?: string
   // True when the entry's entry.json declares a "launcher" front-end (a
   // has-entry plugin: webui, tray app, …). List surfaces (`/entry`, `meowcode
-  // entry list`) show a [launcher] mark for these so "changes how MeowCode
-  // starts" is visible before you enter one.
+  // entry list`) show a [launcher] mark for these so "replaces the whole UI" is
+  // visible before you enter one.
   hasLauncher: boolean
+  // The built-in terminal UI. Marked so it reads as the one entry you can't
+  // delete or recreate.
+  builtin: boolean
   dir: string
 }
 
 // Entry names double as directory names, so reject anything that could escape
-// ENTRIES_DIR or collide with tooling (mirrors dsh's resolveProfileDir).
+// ENTRIES_DIR or collide with tooling (an entry dir is code-shaped: a launcher
+// command, skills, MCP servers — a name with a slash or dot in it invites
+// path-traversal foot-guns).
 export function isValidEntryName(name: string): boolean {
   if (!name || name === '.' || name === '..' || name === 'node_modules') return false
   if (name.length > 64) return false
@@ -121,9 +137,17 @@ export function listEntries(): EntryMeta[] {
     if (!e.isDirectory() || !isValidEntryName(e.name)) continue
     const dir = path.join(ENTRIES_DIR, e.name)
     const ov = readEntryOverrides(e.name)
-    out.push({ name: e.name, description: ov.description, hasLauncher: isLauncherDecl(ov.launcher), dir })
+    out.push({
+      name: e.name,
+      description: ov.description,
+      hasLauncher: isLauncherDecl(ov.launcher),
+      builtin: e.name === BUILTIN_ENTRY,
+      dir,
+    })
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name))
+  // The built-in TUI always leads: it is the default front-end, so it is what
+  // you want row 1 to be even when it sorts alphabetically after something else.
+  return out.sort((a, b) => (a.builtin ? -1 : b.builtin ? 1 : a.name.localeCompare(b.name)))
 }
 
 // The default entry lives at CONFIG_DIR/entry.json as { "default": "<name>" }.
@@ -138,7 +162,8 @@ export function getDefaultEntry(): string | null {
   }
 }
 
-// null clears the default (back to global mode at startup).
+// null clears the default — startup then falls back to the built-in TUI, which is
+// what an unset default has always meant.
 export function setDefaultEntry(name: string | null): void {
   fs.mkdirSync(CONFIG_DIR, { recursive: true })
   if (name === null) {
@@ -147,6 +172,23 @@ export function setDefaultEntry(name: string | null): void {
   }
   if (!isValidEntryName(name)) throw new Error(`Invalid entry name: ${name}`)
   fs.writeFileSync(DEFAULT_ENTRY_FILE, JSON.stringify({ default: name }, null, 2))
+}
+
+// Create the built-in `tui` entry if it isn't there yet, so it shows up in every
+// list alongside plugin entries and can be made the default like any other. Only
+// entry.json is written — deliberately NOT settings.json, so activating `tui`
+// layers nothing on top of the global config and `meowcode` and `meowcode tui`
+// read and write exactly the same files. A user who wants the built-in entry to
+// carry its own model/theme just drops a settings.json in there; from then on it
+// behaves like any other entry. Idempotent, and never clobbers existing files.
+export function materializeBuiltinEntry(): void {
+  const dir = entryDir(BUILTIN_ENTRY)
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+  } catch {
+    return // unwritable — the built-in UI still works, it just won't be listed
+  }
+  writeIfAbsent(path.join(dir, 'entry.json'), JSON.stringify({ name: BUILTIN_ENTRY }, null, 2))
 }
 
 // --- Active-entry context ---------------------------------------------------
@@ -186,14 +228,18 @@ export function entryActive(): boolean {
   return active !== null
 }
 
-// Per-entry state locations. Active → inside the entry dir; else the legacy
-// global locations, so a never-entry user sees zero behavior change.
+// Conversation state lives at the CONFIG_DIR root and is SHARED by every entry:
+// sessions, memory (incl. projects/) and history are one continuous record of
+// what you and the agent have done, no matter which front-end you happened to be
+// driving. An entry swaps the *surface* and its wiring, never the history. These
+// helpers therefore ignore `active` — the `kind` parameter is kept so callers
+// read as before and so a future split has an obvious place to hook.
 export function stateDir(kind: 'sessions' | 'memory' | 'projects' | 'mailbox'): string {
-  return active ? path.join(active.dir, kind) : path.join(CONFIG_DIR, kind)
+  return path.join(CONFIG_DIR, kind)
 }
 
 export function stateFile(kind: 'history'): string {
-  return active ? path.join(active.dir, `${kind}.json`) : path.join(CONFIG_DIR, `${kind}.json`)
+  return path.join(CONFIG_DIR, `${kind}.json`)
 }
 
 // --- Config layering --------------------------------------------------------
@@ -322,6 +368,9 @@ function writeIfAbsent(file: string, content: string): void {
 }
 
 export function createEntry(name: string, template?: EntryTemplate): void {
+  // The built-in TUI entry is materialized at startup, never created by hand —
+  // `/entry new tui` would otherwise silently reset a user's tui settings.
+  if (name === BUILTIN_ENTRY) throw new Error(`'${BUILTIN_ENTRY}' is the built-in entry and cannot be created`)
   const dir = entryDir(name) // throws on invalid name
   fs.mkdirSync(dir, { recursive: true })
   // entry.json: the template's manifest fields plus the (redundant but handy)

@@ -41,11 +41,13 @@ vi.mock('../config', () => ({ saveConfig: saveConfigSpy }))
 import {
   ENTRIES_DIR,
   CONFIG_DIR,
+  BUILTIN_ENTRY,
   isValidEntryName,
   isLauncherDecl,
   entryDir,
   readEntryOverrides,
   listEntries,
+  materializeBuiltinEntry,
   entryExists,
   getDefaultEntry,
   setDefaultEntry,
@@ -171,6 +173,49 @@ describe('listEntries / readEntryOverrides', () => {
   })
 })
 
+describe('materializeBuiltinEntry', () => {
+  it('creates the tui entry with a bare manifest and no settings layer', () => {
+    materializeBuiltinEntry()
+    const dir = entryDir(BUILTIN_ENTRY)
+    expect(entryExists(BUILTIN_ENTRY)).toBe(true)
+    // entry.json is all there is: no settings.json, so activating tui layers
+    // nothing over the global config and `meowcode` reads the same files as
+    // `meowcode tui`.
+    expect(fs.existsSync(path.join(dir, 'settings.json'))).toBe(false)
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'entry.json'), 'utf8'))).toEqual({ name: BUILTIN_ENTRY })
+  })
+
+  it('is idempotent and never clobbers what is already there', () => {
+    materializeBuiltinEntry()
+    // A user who gave the built-in entry its own config keeps it.
+    writeJson(path.join(entryDir(BUILTIN_ENTRY), 'settings.json'), { model: 'my-model' })
+    fs.writeFileSync(path.join(entryDir(BUILTIN_ENTRY), 'entry.json'), JSON.stringify({ name: BUILTIN_ENTRY, description: 'mine' }))
+    materializeBuiltinEntry()
+    expect(JSON.parse(fs.readFileSync(path.join(entryDir(BUILTIN_ENTRY), 'settings.json'), 'utf8'))).toEqual({ model: 'my-model' })
+    expect(JSON.parse(fs.readFileSync(path.join(entryDir(BUILTIN_ENTRY), 'entry.json'), 'utf8')).description).toBe('mine')
+  })
+
+  it('lists tui first, marked builtin, ahead of plugin entries', () => {
+    writeJson(path.join(ENTRIES_DIR, 'aaa', 'entry.json'), { description: 'sorts first by name' })
+    writeJson(path.join(ENTRIES_DIR, 'webui', 'entry.json'), { launcher: { command: 'node' } })
+    materializeBuiltinEntry()
+    const list = listEntries()
+    expect(list.map((e) => e.name)).toEqual([BUILTIN_ENTRY, 'aaa', 'webui'])
+    expect(list[0]).toMatchObject({ name: BUILTIN_ENTRY, builtin: true, hasLauncher: false })
+    expect(list.find((e) => e.name === 'webui')?.hasLauncher).toBe(true)
+  })
+
+  it('adding tui as the default reads and writes exactly what no entry does', () => {
+    materializeBuiltinEntry()
+    setDefaultEntry(BUILTIN_ENTRY)
+    expect(getDefaultEntry()).toBe(BUILTIN_ENTRY)
+    activateEntry(BUILTIN_ENTRY)
+    // An empty manifest layers nothing, so the effective config is the base.
+    const base = baseConfig()
+    expect(applyEntryOverrides(base)).toEqual(base)
+  })
+})
+
 describe('default entry persistence', () => {
   it('round-trips set/get and clears on null', () => {
     expect(getDefaultEntry()).toBeNull()
@@ -196,7 +241,7 @@ describe('default entry persistence', () => {
 })
 
 describe('active-entry context and path routing', () => {
-  it('routes to global paths with no entry active', () => {
+  it('keeps state at the global paths with no entry active', () => {
     expect(entryActive()).toBe(false)
     expect(activeEntry()).toBeNull()
     expect(activeEntryName()).toBeNull()
@@ -207,14 +252,27 @@ describe('active-entry context and path routing', () => {
     expect(stateFile('history')).toBe(path.join(CONFIG_DIR, 'history.json'))
   })
 
-  it('routes to per-entry paths when active and mkdirs the entry dir', () => {
+  // Sessions, memory (incl. projects/) and history are SHARED between entries —
+  // an entry swaps the front-end, not the conversation. So the paths are the same
+  // with one active as with none, and the entry dir never grows a sessions/.
+  it('shares the same state paths when an entry is active', () => {
     const a = activateEntry('work')
     expect(a).toEqual({ name: 'work', dir: path.join(ENTRIES_DIR, 'work') })
     expect(entryActive()).toBe(true)
     expect(activeEntryName()).toBe('work')
     expect(fs.statSync(path.join(ENTRIES_DIR, 'work')).isDirectory()).toBe(true)
-    expect(stateDir('sessions')).toBe(path.join(ENTRIES_DIR, 'work', 'sessions'))
-    expect(stateFile('history')).toBe(path.join(ENTRIES_DIR, 'work', 'history.json'))
+    expect(stateDir('sessions')).toBe(path.join(CONFIG_DIR, 'sessions'))
+    expect(stateDir('memory')).toBe(path.join(CONFIG_DIR, 'memory'))
+    expect(stateDir('projects')).toBe(path.join(CONFIG_DIR, 'projects'))
+    expect(stateFile('history')).toBe(path.join(CONFIG_DIR, 'history.json'))
+  })
+
+  it('gives the built-in tui entry the same paths as no entry at all', () => {
+    activateEntry(null)
+    const none = stateDir('sessions')
+    activateEntry(BUILTIN_ENTRY)
+    expect(stateDir('sessions')).toBe(none)
+    expect(stateFile('history')).toBe(path.join(CONFIG_DIR, 'history.json'))
   })
 
   it('activateEntry(null) restores global mode', () => {
@@ -364,5 +422,11 @@ describe('createEntry', () => {
 
   it('throws on an invalid name', () => {
     expect(() => createEntry('a/b')).toThrow()
+  })
+
+  // `tui` is materialized at startup, never created by hand: `/entry new tui`
+  // must not silently reset a user's built-in-entry settings.
+  it('refuses to create the built-in entry', () => {
+    expect(() => createEntry(BUILTIN_ENTRY)).toThrow(/built-in/)
   })
 })

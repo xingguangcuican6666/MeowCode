@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Box, Text, useInput, useStdin, useStdout } from 'ink'
 import { PICKER_MOTION_ON, PICKER_MOTION_OFF } from '../lib/termmodes'
+import { decodeInput } from '../lib/inkinput'
 import { useTheme } from '../theme'
 import { useT } from '../lib/i18n'
 import { truncateToWidth, wrapToWidth } from '../lib/text'
@@ -88,38 +89,28 @@ export function LegacyDirDialog({ info, dest, onDone }: Props): React.ReactEleme
   const layoutRef = useRef({ firstItemRow, lastItemRow: firstItemRow + OPTIONS.length - 1 })
   layoutRef.current = { firstItemRow, lastItemRow: firstItemRow + OPTIONS.length - 1 }
 
-  // Decode the chunk here rather than leaning on `key`. Ink hands useInput one whole
-  // read chunk as a single `input`, and its parseKeypress reports just ONE keypress
-  // for it: "2\r" arrives as name="" / input="2\r", and "\x1b[B\r" as name="down" /
-  // input="". So `key.return` is false for a fast "2⏎" and every key after the
-  // first is silently swallowed. Walking the chunk gives each key its own verdict.
-  // Only a chunk that is *nothing but* ESC means "skip" — an ESC that opens a
-  // CSI/SS3 sequence is that sequence's introducer, not a keystroke.
+  // Decode the chunk through lib/keychunks rather than leaning on `key`. Ink
+  // hands useInput one whole read chunk as a single `input`, and its
+  // parseKeypress reports just ONE keypress for it: "2\r" arrives as name="" /
+  // input="2\r", and "\x1b[B\r" as name="down" / input="". So `key.return` is
+  // false for a fast "2⏎" and every key after the first is silently swallowed.
+  // A plain "↑" goes the other way and arrives as input="" — decodeInput takes
+  // both of Ink's arguments so neither case is lost.
   const answer = (choice: LegacyChoice): void => onDoneRef.current(choice)
-  useInput((input) => {
-    // Mouse reports, in case a terminal delivers one as text (see the listener below).
-    if (/\x1b\[<\d+;\d+;\d+[Mm]/.test(input) || /\x1b\[M/.test(input)) return
-    for (let i = 0; i < input.length; i++) {
-      const ch = input[i]
-      if (ch === '\x1b') {
-        if (input.length === 1) { answer('skip'); return }
-        const seq = input.slice(i + 1).match(/^[[\]O]?([\d;]*)([A-Za-z~])/)
-        if (!seq) { answer('skip'); return }
-        const param = Number(seq[1].split(';')[0])
-        if (seq[2] === 'A' || (seq[2] === '~' && param === 1)) move(-1)
-        else if (seq[2] === 'B' || (seq[2] === '~' && param === 4)) move(1)
-        // PageUp/PageDown sweep a whole screen of options; any other `~` sequence
-        // (Home, End, Delete…) means nothing here — consume it, don't answer.
-        else if (seq[2] === '~' && param === 5) move(-OPTIONS.length)
-        else if (seq[2] === '~' && param === 6) move(OPTIONS.length)
-        i += seq[0].length // step over the sequence, not the rest of the chunk
-        continue
-      }
-      if (ch === '\r' || ch === '\n') { answer(OPTIONS[indexRef.current]); return }
-      if (ch === 'y' || ch === 'Y') { answer('merge'); return }
-      if (ch === 'n' || ch === 'N') { answer('skip'); return }
-      if (ch >= '1' && ch <= String(OPTIONS.length)) select(Number(ch) - 1)
-    }
+  useInput((input, key) => {
+    decodeInput({ input, key }, {
+      onEscape: () => answer('skip'),
+      onUp: () => move(-1),
+      onDown: () => move(1),
+      onPageUp: () => move(-OPTIONS.length),
+      onPageDown: () => move(OPTIONS.length),
+      onReturn: () => answer(OPTIONS[indexRef.current]),
+      onChar: (ch) => {
+        if (ch === 'y' || ch === 'Y') answer('merge')
+        else if (ch === 'n' || ch === 'N') answer('skip')
+        else if (ch >= '1' && ch <= String(OPTIONS.length)) select(Number(ch) - 1)
+      },
+    })
   })
 
   // Mouse: hover moves the highlight, click selects, wheel moves the cursor.

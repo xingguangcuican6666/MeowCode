@@ -16,13 +16,13 @@ import { StringDecoder } from 'node:string_decoder'
 // The exact sequences (and the Terminal.app mouse gate) live in lib/termmodes so
 // the /editor bridge in app.tsx can leave and re-enter the same modes.
 import { ALT_ON, ALT_OFF, MOUSE_ON, MOUSE_OFF, CLEAR } from './lib/termmodes'
-// `meowcode entry install|remove` — dsh-style profile management. The heavy
+// `meowcode entry install|remove` — entry (front-end) management. The heavy
 // lifting lives in lib/entryInstall; this wiring only parses --force, prints
 // the one-line result (or the error) and exits — nothing throws past main().
 import { EntryInstallError, entryInstallCommand } from './lib/entryInstall'
 import {
   activateEntry, activeEntry, createEntry, entryDir, entryExists, getDefaultEntry,
-  listEntries, setDefaultEntry, activeEntryName,
+  listEntries, materializeBuiltinEntry, setDefaultEntry, activeEntryName,
 } from './lib/entries'
 import { readLauncherConfig, runLauncher } from './lib/launcher'
 // The AnyCode→MeowCode rename migration (one-time question at startup, see
@@ -74,7 +74,7 @@ Options:
       --fork-session [id]  Open a copy of a saved session, leaving the original intact
       --model <id>       Model to use for this run
       --provider <id>    Provider to use (mock | anthropic)
-      --entry <name>      Use the named entry (profile) for this run
+      --entry <name>      Start the named entry (a front-end of its own)
   -h, --help             Show this help
   -v, --version          Show the version
 
@@ -281,10 +281,10 @@ async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSn
   process.exit(0)
 }
 
-// `meowcode entry ...` — non-interactive entry (profile) management. Runs and
+// `meowcode entry ...` — non-interactive entry (front-end) management. Runs and
 // exits before any interactive mount. Markers: ● on the default, ▶ on the
 // active entry of this process (only meaningful under `entry list` invoked
-// with --entry, kept for completeness).
+// with --entry, kept for completeness), [builtin] on the built-in TUI.
 function runEntryCommand(args: string[]): void {
   const sub = args[0] ?? 'list'
   if (sub === 'list' || sub === 'ls') {
@@ -292,7 +292,7 @@ function runEntryCommand(args: string[]): void {
     const def = getDefaultEntry()
     if (entries.length === 0) { process.stdout.write('No entries yet (create one with `meowcode entry new <name>`).\n'); return }
     for (const e of entries) {
-      const marks = [e.name === def ? '●' : null, e.name === activeEntryName() ? '▶' : null, e.hasLauncher ? '[launcher]' : null].filter(Boolean).join(' ')
+      const marks = [e.name === def ? '●' : null, e.name === activeEntryName() ? '▶' : null, e.builtin ? '[builtin]' : null, e.hasLauncher ? '[launcher]' : null].filter(Boolean).join(' ')
       const desc = e.description ? ` — ${e.description}` : ''
       process.stdout.write(`${marks ? marks.padEnd(2) : ' '} ${e.name}${desc}\n`)
     }
@@ -405,10 +405,18 @@ async function main(): Promise<void> {
   const outcome = await offerLegacyMigration(askLegacyDir)
   if (outcome.merged) reportMergeOutcome(outcome)
 
-  // Entry (profile) resolution, before anything config-touching: an explicit
-  // --entry wins; else the persisted default; else global mode. A positional
-  // shorthand `meowcode <name>` activates when argv[0] is an existing entry
-  // name (and is then removed so it isn't parsed as anything else).
+  // The built-in TUI is a real entry, so materialize it before anything reads
+  // the entry list or resolves a default: that makes `meowcode tui` (the argv
+  // shorthand below) work on a fresh install, and makes `tui` show up as row 1
+  // of `/entry` next to the plugin entries. Idempotent and never clobbers an
+  // existing entries/tui/.
+  materializeBuiltinEntry()
+
+  // Entry resolution, before anything config-touching: an explicit --entry wins;
+  // else the persisted default; else global mode — which reads and writes exactly
+  // the files the built-in `tui` entry does, so "no default" means "start the TUI".
+  // A positional shorthand `meowcode <name>` activates when argv[0] is an
+  // existing entry name (and is then removed so it isn't parsed as anything else).
   if (argv[0] === 'entry') { runEntryCommand(argv.slice(1)); return }
   if (argv[0] && !argv[0].startsWith('-') && entryExists(argv[0])) {
     const shorthand = argv.shift() ?? null

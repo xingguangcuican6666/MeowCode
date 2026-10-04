@@ -1281,12 +1281,18 @@ const chrome: SlashCommand = {
   },
 }
 
-// /entry — the in-session management surface for entries (dsh-style profiles).
+// /entry — the in-session management surface for entries. An entry is a complete
+// front-end of its own (its own UI and wiring, optionally a launcher that replaces
+// the TUI entirely), NOT a per-user profile; the built-in TUI is itself the entry
+// `tui`. Sessions and memory are shared across entries.
 // Management only: an entry binds at startup (--entry / positional / default), so
 // this lists, creates, and edits the default pointer but never switches the
 // active entry — changing that needs a restart, which every message says.
-// Remove reuses the installer's removeEntry so its sessions/memory protection
-// (--force) applies everywhere; its EntryInstallError reads as a clean red line.
+// Bare `/entry` opens the interactive menu when the host can mount one (the
+// CommandContext hook); every subcommand below stays for scripts and non-TTY runs,
+// where printList() is the fallback. Remove reuses the installer's removeEntry so
+// its data protection (--force) and the built-in-entry guard apply everywhere; its
+// EntryInstallError reads as a clean red line.
 const entry: SlashCommand = {
   name: 'entry',
   get description() { return t('cmd.entryDesc') },
@@ -1302,12 +1308,16 @@ const entry: SlashCommand = {
       const def = getDefaultEntry()
       const active = activeEntryName()
       const lines = ents.map((e) => {
-        const marks = [e.name === active ? '● ' : '', e.name === def ? t('cmd.entryDefaultSuffix') : '', e.hasLauncher ? t('cmd.entryLauncherMark') : ''].filter(Boolean).join(' ')
+        const marks = [e.name === active ? '● ' : '', e.name === def ? t('cmd.entryDefaultSuffix') : '', e.builtin ? t('cmd.entryBuiltinMark') : '', e.hasLauncher ? t('cmd.entryLauncherMark') : ''].filter(Boolean).join(' ')
         return `- \`${e.name}\`${marks ? ' ' + marks : ''}${e.description ? ' — ' + e.description : ''}`
       })
       ctx.print([t('cmd.entryTitle'), '', ...lines, '', t('cmd.entryListFooter')].join('\n'), 'system')
     }
 
+    // Bare `/entry`: hand over to the interactive menu when there is one (an
+    // interactive Ink session), else print the list — print mode, pipes and CI
+    // have no menu to mount.
+    if (verb === '' && ctx.openEntryMenu) { ctx.openEntryMenu(); return }
     if (verb === '' || verb === 'list' || verb === 'ls') { printList(); return }
 
     if (verb === 'current') {

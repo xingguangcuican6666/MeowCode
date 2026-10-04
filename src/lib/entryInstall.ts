@@ -10,9 +10,10 @@
 // package name (scope stripped, @scope/foo → foo), else the spec-derived name
 // (git repo name / bare npm spec / dir basename). Install = createEntry()
 // (which never overwrites) plus a never-overwrite copy of any shipped skills/
-// commands/agents dirs from the source root. Remove rm -rf's the entry dir but
-// REFUSES to destroy sessions/ or memory/ content without --force (user data
-// protection), and clears the default-entry pointer if it pointed here.
+// commands/agents dirs from the source root. Remove rm -rf's the entry dir (never
+// the built-in `tui` entry, which startup re-materializes) but REFUSES to destroy
+// sessions/ or memory/ content without --force (user data protection), and clears
+// the default-entry pointer if it pointed here.
 //
 // npm/git/tar are driven via child_process — no new npm deps. Every failure
 // raises EntryInstallError carrying a clean one-line message; the cli.tsx
@@ -21,7 +22,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createEntry, entryDir, entryExists, getDefaultEntry, isValidEntryName, setDefaultEntry } from './entries'
+import { BUILTIN_ENTRY, createEntry, entryDir, entryExists, getDefaultEntry, isValidEntryName, setDefaultEntry } from './entries'
 import type { EntryTemplate } from './entries'
 
 // The only error type that escapes this module — the CLI catches it and prints
@@ -234,13 +235,17 @@ export function installEntry(spec: string, opts?: InstallOptions): string {
   }
 }
 
-// Remove an installed entry. Refuses when the entry holds user data — anything
-// at all under sessions/ or memory/ — unless force is passed; clears the
-// default-entry pointer when the removed entry was the default. Returns a
-// one-line report of what was removed.
+// Remove an installed entry. The built-in `tui` entry is refused outright — it is
+// materialized on every startup, so deleting it would only make it reappear (and a
+// user who wants the built-in UI back has no other way to get it). Refuses when
+// the entry holds user data — anything at all under sessions/ or memory/ (only
+// possible for an entry created before those became global) — unless force is
+// passed; clears the default-entry pointer when the removed entry was the
+// default. Returns a one-line report of what was removed.
 export function removeEntry(name: string, opts?: InstallOptions): string {
   const force = !!opts?.force
   if (!isValidEntryName(name)) fail(`"${name}" is not a valid entry name`)
+  if (name === BUILTIN_ENTRY) fail(`"${BUILTIN_ENTRY}" is the built-in entry and cannot be removed`)
   const dir = entryDir(name)
   if (!entryExists(name)) fail(`no entry named "${name}" in ~/.meowcode/entries`)
   if (!force) {

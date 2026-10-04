@@ -438,6 +438,8 @@ export interface CommandContext {
   openAutoCompact?: () => void
   /** Open the interactive /effort slider picker (interactive sessions only). */
   openEffortPicker?: () => void
+  /** Open the interactive /entry menu: list entries, then act on one (interactive sessions only). */
+  openEntryMenu?: () => void
   /** Open the last assistant response in $EDITOR (the `lastResponseInEditor` setting; interactive sessions only). */
   openEditor?: (text: string) => void
 }

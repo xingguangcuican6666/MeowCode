@@ -10,6 +10,7 @@ import { LoginPanel } from './components/LoginPanel'
 import { SessionPicker } from './components/SessionPicker'
 import { RewindMenu } from './components/RewindMenu'
 import { AutoCompactPicker, type AutoCompactChoice } from './components/AutoCompactPicker'
+import { EntryPicker } from './components/EntryPicker'
 import { EffortPicker, type EffortChoice } from './components/EffortPicker'
 import { PermissionDialog, type PermissionChoice } from './components/PermissionDialog'
 import { AskUserDialog } from './components/AskUserDialog'
@@ -135,6 +136,9 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
   // The /autocompact window picker overlay (opened by bare /autocompact). Chooses
   // when auto-compaction fires (off / auto / an explicit token window).
   const [autoCompactOpen, setAutoCompactOpen] = useState(false)
+  // The /entry menu overlay (opened by bare /entry). Three steps — pick an entry,
+  // pick an action, or type a name for a new one — all inside this one overlay.
+  const [entryOpen, setEntryOpen] = useState(false)
   // The /effort slider overlay (opened by bare /effort). A Faster↔Smarter slider
   // over the five effort levels plus the "ultracode" stop (xhigh + workflows).
   const [effortOpen, setEffortOpen] = useState(false)
@@ -239,6 +243,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
   const goalRef = useRef(goal); goalRef.current = goal
   const panelRef = useRef(panel); panelRef.current = panel
   const effortOpenRef = useRef(effortOpen); effortOpenRef.current = effortOpen
+  const entryOpenRef = useRef(entryOpen); entryOpenRef.current = entryOpen
   // Live mirror of the pending permission prompt (so the global useInput can yield
   // the keyboard to the dialog) plus the session allow-list of tools the user
   // chose to "always allow" — those auto-resolve without re-prompting.
@@ -560,7 +565,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
 
   // A modal overlay (theme picker / settings / workflow tree) replaces the whole
   // content area — you operate it rather than read the transcript behind it.
-  const modalOpen = pickerOpen || modelOpen || loginOpen || resumeOpen || rewindOpen || autoCompactOpen || !!panel || !!expandedWf
+  const modalOpen = pickerOpen || modelOpen || loginOpen || resumeOpen || rewindOpen || autoCompactOpen || entryOpen || !!panel || !!expandedWf
   modalOpenRef.current = modalOpen
   // Any open dialog/overlay that the `dialogExpiry` idle-timer governs (the
   // inline /effort picker included, but NOT the permission prompt — that has its
@@ -903,7 +908,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
     const id = setTimeout(() => {
       setPickerOpen(false); setModelOpen(false); setLoginOpen(false); setResumeOpen(false)
       setRewindOpen(false)
-      setAutoCompactOpen(false); setEffortOpen(false); setPanel(null); setWfExpanded(null)
+      setAutoCompactOpen(false); setEntryOpen(false); setEffortOpen(false); setPanel(null); setWfExpanded(null)
     }, secs * 1000)
     return () => clearTimeout(id)
   }, [chat.config.settings, anyDialogOpen, dlgActivity])
@@ -1115,6 +1120,12 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
     // The expanded workflow tree owns the keyboard (its own useInput handles
     // ↑↓/x/esc) while open.
     if (wfExpandedRef.current) return
+    // The /entry menu is a modal with its own useInput (arrows/digits/typing/esc),
+    // so App must not also answer those keys — only ctrl+c dismisses it here.
+    if (entryOpenRef.current) {
+      if (key.ctrl && input === 'c') { setEntryOpen(false); return }
+      return
+    }
     // While the settings overlay is open it owns the keyboard (its own useInput
     // handles esc/arrows/typing); don't let esc here also interrupt/stop.
     if (panelRef.current) {
@@ -1373,6 +1384,9 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
     openResume: () => setResumeOpen(true),
     openAutoCompact: () => setAutoCompactOpen(true),
     openEffortPicker: () => setEffortOpen(true),
+    // The /entry menu: list the entries, then act on one. The subcommands
+    // (/entry list|default|…) stay for scripts and non-interactive runs.
+    openEntryMenu: () => setEntryOpen(true),
     // Open the last response in $EDITOR (the `lastResponseInEditor` setting). We
     // hand the terminal fully to the editor: drop Ink's raw mode AND leave our
     // alternate screen + mouse/kitty modes on suspend, then re-enter and repaint
@@ -1660,6 +1674,12 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
                   setAutoCompactOpen(false)
                 }}
                 onCancel={() => setAutoCompactOpen(false)}
+              />
+            ) : entryOpen ? (
+              <EntryPicker
+                width={width}
+                print={(text, error) => chat.print(text, 'system', error ? { error: true } : undefined)}
+                onCancel={() => setEntryOpen(false)}
               />
             ) : panel ? (
               <SettingsPanel
