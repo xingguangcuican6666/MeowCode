@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import fs from 'node:fs'
+import net from 'node:net'
 import path from 'node:path'
 
 // Same homedir-mock trick as entries.test.ts: legacyDir.ts computes both dirs
@@ -44,6 +45,32 @@ function write(file: string, body: string): void {
 
 function seedLegacy(files: Record<string, string> = {}): void {
   for (const [rel, body] of Object.entries(files)) write(path.join(LEGACY_CONFIG_DIR, rel), body)
+}
+
+// A socket left behind by a session that died — exactly the state every old
+// ~/.anycode/ipc holds. Closing a listening Unix socket UNLINKS its path, so we
+// park a second name on the same inode first and then close: renaming the link
+// back leaves a socket inode with nothing listening on it. copyFileSync on it
+// throws ENXIO, which is what the migration used to die on.
+async function makeStaleSocket(file: string): Promise<void> {
+  const server = net.createServer()
+  await new Promise<void>((resolve, reject) => {
+    server.on('error', reject)
+    server.listen(file, () => {
+      fs.linkSync(file, `${file}.keep`)
+      server.close(() => { resolve() })
+    })
+  })
+  fs.renameSync(`${file}.keep`, file)
+}
+
+// A fifo, i.e. the other non-regular file type that hangs a naive copy.
+// process.mkfifo is POSIX-only and untyped, so reach for it through a cast.
+function makeFifo(file: string): boolean {
+  const mkfifo = (process as unknown as { mkfifo?: (p: string) => void }).mkfifo
+  if (!mkfifo) return false
+  mkfifo(file)
+  return true
 }
 
 beforeEach(() => {
@@ -154,6 +181,43 @@ describe('mergeLegacyDir', () => {
   it('is a no-op when the legacy dir is gone', () => {
     expect(mergeLegacyDir()).toEqual({ files: 0, dirs: 0, skipped: 0 })
     expect(fs.existsSync(CONFIG_DIR)).toBe(false)
+  })
+
+  // Regression: ~/.anycode/ipc holds one dead Unix socket per past session, and
+  // fs.copyFileSync on a socket throws ENXIO ("no such device or address") — the
+  // whole migration aborted on it, leaving the user with a stack trace and an
+  // unmarked (so permanently re-prompted) config dir.
+  it('never copies the ipc socket dir, and does not throw on it', async () => {
+    seedLegacy({ 'settings.json': '{}', 'sessions/a.json': '{"id":"a"}' })
+    const ipc = path.join(LEGACY_CONFIG_DIR, 'ipc')
+    fs.mkdirSync(ipc, { recursive: true })
+    await makeStaleSocket(path.join(ipc, 'munkp253-i9pj44.sock'))
+    const r = mergeLegacyDir()
+    expect(r.files).toBe(2)
+    expect(fs.existsSync(path.join(CONFIG_DIR, 'ipc'))).toBe(false)
+    // …and the stale socket is still in the old dir, untouched.
+    expect(fs.existsSync(path.join(ipc, 'munkp253-i9pj44.sock'))).toBe(true)
+    expect(fs.existsSync(path.join(CONFIG_DIR, '.migrated-from-anycode'))).toBe(true)
+  })
+
+  it('skips stray non-regular files nested in a copied tree', () => {
+    seedLegacy({ 'projects/demo/notes.md': 'hi' })
+    // A fifo would make copyFileSync block forever if we didn't type-check it.
+    if (!makeFifo(path.join(LEGACY_CONFIG_DIR, 'projects', 'demo', 'pipe'))) return
+    const r = mergeLegacyDir()
+    expect(r.files).toBe(1)
+    expect(fs.existsSync(path.join(CONFIG_DIR, 'projects', 'demo', 'notes.md'))).toBe(true)
+    expect(fs.existsSync(path.join(CONFIG_DIR, 'projects', 'demo', 'pipe'))).toBe(false)
+  })
+
+  it('skips a nested runtime dir inside a copied tree', () => {
+    // The filter is by name and applies at every level: an entry that ships its
+    // own ipc dir keeps the manifest but never the runtime sockets inside it.
+    write(path.join(LEGACY_CONFIG_DIR, 'entries/work/entry.json'), '{}')
+    write(path.join(LEGACY_CONFIG_DIR, 'entries/work/ipc/x.sock'), 's')
+    mergeLegacyDir()
+    expect(fs.existsSync(path.join(CONFIG_DIR, 'entries/work/entry.json'))).toBe(true)
+    expect(fs.existsSync(path.join(CONFIG_DIR, 'entries/work/ipc'))).toBe(false)
   })
 })
 

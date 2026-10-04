@@ -56,7 +56,15 @@ const MERGEABLE_FILES = [
 ] as const
 
 // Directories copied recursively when absent on the destination side.
-const MERGEABLE_DIRS = ['sessions', 'memory', 'projects', 'mailbox', 'skills', 'commands', 'agents', 'entries', 'feedback', 'ipc', 'ide'] as const
+const MERGEABLE_DIRS = ['sessions', 'memory', 'projects', 'mailbox', 'skills', 'commands', 'agents', 'entries', 'feedback'] as const
+
+// Runtime state that belongs to a RUNNING process rather than to the user, so
+// there is nothing to carry over: `ipc/` holds one dead Unix socket per past
+// session (copyFileSync on a socket fails with ENXIO — it has no filesystem node
+// to copy — and a live one would land as a dangling endpoint nobody can connect
+// to) and `ide/` is IDE lock files rewritten on every launch. Both are recreated
+// on demand, so ~/.meowcode simply starts without them.
+const TRANSIENT_DIRS = new Set(['ipc', 'ide'])
 
 // Skip node_modules and dotfiles inside content trees — a vendored dependency
 // tree or a .DS_Store is not user state, and copying it wastes the user's time.
@@ -114,20 +122,33 @@ export function inspectLegacyDir(): LegacyDirInfo | null {
 
 function copyFileNoOverwrite(from: string, to: string): boolean {
   if (exists(to)) return false // never clobber newer MeowCode state
-  fs.mkdirSync(path.dirname(to), { recursive: true })
-  fs.copyFileSync(from, to)
-  return true
+  try {
+    // Only regular files have contents to copy: a socket, fifo or device node
+    // throws (ENXIO/EINVAL) or would hang, and a broken symlink has no target.
+    if (!fs.lstatSync(from).isFile()) return false
+    fs.mkdirSync(path.dirname(to), { recursive: true })
+    fs.copyFileSync(from, to)
+    return true
+  } catch {
+    // One unreadable file must not abort the whole migration — the marker is
+    // stamped only after every copy, so a throw here would leave us unmarked
+    // and nag the user on every start. Skipping is the safe loss: the old dir
+    // keeps the original, and the run still reports what did land.
+    return false
+  }
 }
 
 function copyTreeNoOverwrite(src: string, dst: string): number {
   fs.mkdirSync(dst, { recursive: true })
   let n = 0
   for (const e of fs.readdirSync(src, { withFileTypes: true })) {
-    if (SKIP_ENTRIES.has(e.name)) continue
+    if (SKIP_ENTRIES.has(e.name) || TRANSIENT_DIRS.has(e.name)) continue
     const from = path.join(src, e.name)
     const to = path.join(dst, e.name)
+    // Anything that isn't a dir or a regular file (a stale session socket, a
+    // fifo, a symlink) has no contents to carry — leave it in the old dir.
     if (e.isDirectory()) n += copyTreeNoOverwrite(from, to)
-    else if (copyFileNoOverwrite(from, to)) n++
+    else if (e.isFile() && copyFileNoOverwrite(from, to)) n++
   }
   return n
 }
