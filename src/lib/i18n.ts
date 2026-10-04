@@ -376,6 +376,7 @@ export const messages = {
   'entry.subtitle': { zh: '已安装的前台（切换需重启）', en: 'Installed front-ends (switching needs a restart)' },
   'entry.listFooter': { zh: '↑↓/滚轮 选择 · ↵ 管理 · 1-9 跳转 · esc 关闭', en: '↑↓/wheel select · ↵ manage · 1-9 jump · esc close' },
   'entry.actionsFooter': { zh: '↑↓ 选择 · ↵ 执行 · esc 返回', en: '↑↓ select · ↵ run · esc back' },
+  'entry.detailsFooter': { zh: 'esc 返回', en: 'esc back' },
   'entry.actionsTitle': { zh: '{name}', en: '{name}' },
   'entry.actDefault': { zh: '设为启动默认', en: 'Make the startup default' },
   'entry.actDefaultClear': { zh: '清除默认（启动回到 TUI）', en: 'Clear the default (startup returns to the TUI)' },

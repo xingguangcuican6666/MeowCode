@@ -17,15 +17,16 @@ interface Props {
   onCancel: () => void
 }
 
-// The two states this overlay lives in. One component, one mount: `list` picks an
-// entry, `actions` operates on it. Esc walks back up that ladder and then closes.
+// The three states this overlay lives in, one mount: `list` picks an entry,
+// `actions` operates on it, `details` reports what it is. Esc walks back up that
+// ladder and then closes.
 //
 // There is deliberately NO "create" step: an entry is a whole front-end shipped
 // by a plugin, not something the user types into existence. What you can install
 // is decided by what plugins you have, so the list is a readout of the installed
 // set — offering to hand-author one would invent an entry with no UI behind it.
 // `meowcode entry install <source>` is the only way an entry appears.
-type Step = 'list' | 'actions'
+type Step = 'list' | 'actions' | 'details'
 
 type Action = 'setDefault' | 'clearDefault' | 'details' | 'remove'
 
@@ -90,19 +91,32 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
     setStep('actions')
   }
 
-  const rowsFor = (): Row[] => {
-    if (step === 'actions') {
-      const rows: Row[] = []
-      // Making the current default the default again would be a no-op, so the
-      // row flips to "clear it" instead.
-      rows.push({ kind: 'action', entry: pickedEntry, action: defaultsTo(picked) ? 'clearDefault' : 'setDefault' })
-      rows.push({ kind: 'action', entry: pickedEntry, action: 'details' })
-      // The built-in entry is materialized on every startup, so a Remove row
-      // could only ever fail — don't offer it.
-      if (!pickedEntry?.builtin) rows.push({ kind: 'action', entry: pickedEntry, action: 'remove' })
-      return rows
-    }
-    return entries.map((e): Row => ({ kind: 'entry', entry: e }))
+  const actionRows = (): Row[] => {
+    const rows: Row[] = []
+    // Making the current default the default again would be a no-op, so the
+    // row flips to "clear it" instead.
+    rows.push({ kind: 'action', entry: pickedEntry, action: defaultsTo(picked) ? 'clearDefault' : 'setDefault' })
+    rows.push({ kind: 'action', entry: pickedEntry, action: 'details' })
+    // The built-in entry is materialized on every startup, so a Remove row
+    // could only ever fail — don't offer it.
+    if (!pickedEntry?.builtin) rows.push({ kind: 'action', entry: pickedEntry, action: 'remove' })
+    return rows
+  }
+
+  // What the details step shows. Kept as an array rather than one joined string
+  // because the menu can wrap each line on its own; the transcript used to get
+  // this as a single line, where "描述：A Web front-end for the same agent" and
+  // "前台：…" ran together into an unreadable run-on.
+  const detailLines = (): string[] => {
+    const meta = pickedEntry
+    if (!meta) return [t('entry.detailsNone', { name: picked ?? '' })]
+    return [
+      t('entry.detailsDir', { dir: meta.dir }),
+      t('entry.detailsDesc', { desc: meta.description || t('entry.noDesc') }),
+      defaultsTo(picked) ? t('entry.detailsDefault') : t('entry.detailsNotDefault'),
+      meta.builtin ? t('entry.detailsBuiltin') : meta.hasLauncher ? t('entry.detailsLauncher') : t('entry.detailsPlain'),
+      t('entry.detailsShared'),
+    ]
   }
 
   const runAction = (row: Row | undefined): void => {
@@ -112,14 +126,17 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
     if (action === 'setDefault') {
       setDefaultEntry(name)
       printRef.current(t('cmd.entryDefaultSet', { name }))
-      backToList()
+      backTo('list')
     } else if (action === 'clearDefault') {
       setDefaultEntry(null)
       printRef.current(t('cmd.entryDefaultCleared'))
-      backToList()
+      backTo('list')
     } else if (action === 'details') {
-      printRef.current(details(name, t))
-      backToList()
+      // Stay inside the overlay. This used to `print()` into the transcript and
+      // drop straight back to the list — but the modal is drawn over the
+      // transcript, so the press showed nothing at all and read as a dead key.
+      // An action whose whole output is invisible is not an action.
+      setStep('details')
     } else if (action === 'remove') {
       if (!confirmRef.current) { setConfirm(true); return } // one more ↵, so a
       // stray click on the row can't delete an entry — the list is still there.
@@ -135,26 +152,33 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
       setConfirm(false)
       const next = listEntries()
       setEntries(next)
-      backToList(next)
+      backTo('list', next)
     }
   }
 
-  // Coming back to `list`: put the cursor back on the entry we were acting on.
+  // Walk one rung down the ladder, restoring the cursor where it belongs.
+  //
   // `openActions` has to zero the cursor because the action rows are a different
   // set, so without this a menu round-trip silently re-targets row 1 — esc would
   // jump the highlight off the entry you were just managing, and "set as default"
-  // would leave the（默认）mark on a row the cursor isn't on. `list` is the list to
+  // would leave the（默认）mark on a row the cursor isn't on. Coming back from
+  // `details` keeps the row it came from (查看详情), and `list` is the list to
   // index into, which differs right after a remove.
-  const backToList = (list: EntryMeta[] = entries): void => {
-    setStep('list')
+  const backTo = (target: 'list' | 'actions', list: EntryMeta[] = entries): void => {
     setConfirm(false)
-    const i = list.findIndex((e) => e.name === picked)
-    const next = i >= 0 ? i : Math.min(indexRef.current, Math.max(0, list.length - 1))
+    let next: number
+    if (target === 'list') {
+      const i = list.findIndex((e) => e.name === picked)
+      next = i >= 0 ? i : Math.min(indexRef.current, Math.max(0, list.length - 1))
+    } else {
+      next = Math.min(indexRef.current, Math.max(0, actionRows().length - 1))
+    }
     indexRef.current = next
     setIndex(next)
+    setStep(target)
   }
 
-  const rows = rowsFor()
+  const rows = step === 'actions' ? actionRows() : step === 'list' ? entries.map((e): Row => ({ kind: 'entry', entry: e })) : []
   const rowCount = rows.length
   // Clamp rather than modulo-scroll on the list step: a 2-entry list that
   // wrap-arrows is disorienting when the list can grow. (The action list is
@@ -187,7 +211,8 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
   useInput((input, key) => {
     decodeInput({ input, key }, {
       onEscape: () => {
-        if (step === 'actions') { backToList(); return }
+        if (step === 'details') { backTo('actions'); return }
+        if (step === 'actions') { backTo('list'); return }
         onCancelRef.current()
       },
       onUp: () => move(-1),
@@ -271,6 +296,19 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
           <Text> </Text>
         </>
       )}
+      {step === 'details' && pickedEntry && (
+        <>
+          <Text bold color={colors.accent} wrap="truncate">
+            {truncateToWidth(`${t('entry.detailsTitle', { name: pickedEntry.name })}  ${marks(pickedEntry, defaultsTo(picked), t)}`, inner)}
+          </Text>
+          <Text> </Text>
+          {detailLines().map((line, i) => (
+            <Text key={i} color={colors.dim} wrap="truncate">
+              {truncateToWidth(line, inner)}
+            </Text>
+          ))}
+        </>
+      )}
       {rows.map((r, i) => {
         const cursor = i === index
         const label = labels[i]
@@ -294,28 +332,9 @@ export function EntryPicker({ width, print, onCancel }: Props): React.ReactEleme
         </Text>
       )}
       <Text> </Text>
-      <Text color={colors.dim} wrap="truncate">{truncateToWidth(t(step === 'list' ? 'entry.listFooter' : 'entry.actionsFooter'), inner)}</Text>
+      <Text color={colors.dim} wrap="truncate">{truncateToWidth(step === 'list' ? t('entry.listFooter') : step === 'actions' ? t('entry.actionsFooter') : t('entry.detailsFooter'), inner)}</Text>
     </Box>
   )
-}
-
-// One flat line about an entry: where it lives, what it is, whether it is the
-// startup default. Printed into the transcript (the menu closes) so it can be
-// scrolled back and copied.
-function details(name: string, t: ReturnType<typeof useT>): string {
-  const meta = listEntries().find((e) => e.name === name)
-  if (!meta) return t('entry.detailsNone', { name })
-  const front = meta.builtin
-    ? t('entry.detailsBuiltin')
-    : meta.hasLauncher ? t('entry.detailsLauncher') : t('entry.detailsPlain')
-  return [
-    t('entry.detailsTitle', { name }),
-    t('entry.detailsDir', { dir: meta.dir }),
-    t('entry.detailsDesc', { desc: meta.description || t('entry.noDesc') }),
-    getDefaultEntry() === name ? t('entry.detailsDefault') : t('entry.detailsNotDefault'),
-    front,
-    t('entry.detailsShared'),
-  ].join('\n')
 }
 
 // The label for an action row. "Clear the default" only appears on the entry

@@ -102,9 +102,12 @@ tui` is refused).
   `meowcode entry new` both refuse with a pointer to `entry install`, and the
   menu has no "new entry" row. The list is a readout of the installed set.
 - `/entry` bare opens the interactive menu (`components/EntryPicker.tsx`: list →
-  actions, keyboard + mouse); the subcommands (`/entry list|current|default|
-  remove`) stay for scripts and non-TTY runs, where bare `/entry` prints the
-  list instead.
+  actions → details, keyboard + mouse); the subcommands (`/entry list|current|
+  default|remove`) stay for scripts and non-TTY runs, where bare `/entry` prints
+  the list instead. Every rung of that ladder restores the cursor where you came
+  from (`backTo`), and **no action may `print` into the transcript and close** —
+  the modal is drawn over the transcript, so output there is invisible and the key
+  reads as dead.
 - Has-entry plugins (`src/lib/launcher.ts`): an entry's `entry.json` may declare
   `"launcher": { "command", "args?", "cwd?", "env?" }`; when active the CLI
   skips the Ink TUI and spawns the front-end over newline-delimited JSON-RPC
