@@ -14,6 +14,8 @@
 //                                resolves with { turn, done } when the model
 //                                stops, streaming progress via notifications
 //     ← agent/event { turn, event }  one AgentEvent of that turn
+//   → agent/abort   {}           abort the in-flight turn (the TUI's esc);
+//                                { aborted }, no error when nothing runs
 //   → tools/list    {}           Anthropic-format tool schemas
 //   → tools/call    { name, input } run one tool, returns the ToolResult
 //   → config/get    {}           the effective AppConfig (apiKey stripped)
@@ -284,8 +286,15 @@ async function runTurn(l: LauncherSession, st: LauncherState, prompt: string): P
     st.controller = null
   }
   if (thinkingAcc.trim()) st.messages = [...st.messages, { id: `${assistantId}-t`, role: 'assistant', content: thinkingAcc, meta: { thinking: true } }]
-  if (acc.trim()) st.messages = [...st.messages, { id: assistantId, role: 'assistant', content: acc }]
-  if (errorMsg && !controller.signal.aborted) {
+  // Same commit rule as useChat: an interrupted turn still commits whatever text
+  // arrived, flagged `interrupted` — a plugin redrawing from session/state has to
+  // be able to tell "the model stopped here" from "the model finished here", and
+  // an abort that lands before the first token must still leave a row.
+  const interrupted = controller.signal.aborted
+  if (acc.trim() || interrupted) {
+    st.messages = [...st.messages, { id: assistantId, role: 'assistant', content: acc, meta: interrupted ? { interrupted: true } : undefined }]
+  }
+  if (errorMsg && !interrupted) {
     st.messages = [...st.messages, { id: `e${turn}`, role: 'system', content: `⚠ ${errorMsg}`, meta: { error: true } }]
   }
   st.usage.turns++
@@ -322,6 +331,17 @@ async function dispatch(l: LauncherSession, st: LauncherState, method: string, p
     }
     case 'agent/turn':
       return await runTurn(l, st, String(params?.prompt ?? ''))
+    case 'agent/abort':
+      // The headless twin of the TUI's esc: abort the in-flight turn and change
+      // nothing else. No turn running is not an error — a stop button pressed
+      // after the turn already ended should not blow up in the plugin's face, so
+      // this reports `aborted: false` rather than throwing. The pending
+      // agent/turn still resolves normally ({ turn }) with the partial answer
+      // committed as `interrupted`, so a plugin needs no abort event to know
+      // when it is over.
+      if (!st.controller) return { aborted: false }
+      st.controller.abort()
+      return { aborted: true }
     default:
       throw new LauncherError(`unknown method: ${method}`)
   }
@@ -330,10 +350,15 @@ async function dispatch(l: LauncherSession, st: LauncherState, method: string, p
 // ---- Entry point -----------------------------------------------------------
 
 // Read the launcher declaration from the active entry's manifest. resolvePath:
-// cwd defaults to the ENTRY dir (not the session cwd), so relative command/args
-// ("launcher.js") resolve there — no absolute paths, no fixture rewriting (this
-// is the launcher reading, complementing the installer's relative-path rewrite
-// for mcpServers).
+// cwd defaults to the ENTRY dir (not the session cwd), so a front-end that only
+// ever names its own files needs no absolute paths and no fixture rewriting.
+//
+// Relative `command`/`args` are anchored to the entry dir — the entry installer's
+// copies land there, so that is the only directory where they can resolve — while a
+// relative `cwd` is deliberately left as written, because spawn resolves it against
+// the *parent's* cwd, which is the session directory. Those two rules together are
+// what let one manifest say `"cwd": "."` and still be relocatable: the plugin gets
+// the session's workspace as process.cwd() and finds its own files beside it.
 export function readLauncherConfig(dir: string): LauncherConfig | null {
   let raw: { launcher?: LauncherConfig }
   try {
@@ -341,8 +366,20 @@ export function readLauncherConfig(dir: string): LauncherConfig | null {
   } catch { return null }
   const lc = raw.launcher
   if (!lc || typeof lc.command !== 'string' || !lc.command) return null
-  const args = Array.isArray(lc.args) ? lc.args : []
-  return { command: lc.command, args, cwd: lc.cwd ?? dir, ...(lc.env ? { env: lc.env } : {}) }
+  // Only strings the entry actually ships get rewritten. That keeps a bare
+  // command name (`node`, `deno`, `bun`) on PATH instead of turning it into
+  // `<entry>/node`, and leaves any other relative argument resolving against the
+  // cwd exactly as it did before — this widens what a manifest can express, it
+  // does not redefine what the old ones meant.
+  const anchor = (s: string): string => {
+    if (!s || path.isAbsolute(s) || s.startsWith('~')) return s
+    try {
+      if (fs.statSync(path.join(dir, s)).isFile()) return path.join(dir, s)
+    } catch { /* not a file the entry ships */ }
+    return s
+  }
+  const args = Array.isArray(lc.args) ? lc.args.map(anchor) : []
+  return { command: anchor(lc.command), args, cwd: lc.cwd ?? dir, ...(lc.env ? { env: lc.env } : {}) }
 }
 
 // Run the launcher front-end until the child exits. The child inherits the real

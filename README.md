@@ -168,6 +168,7 @@ version } }` — which the plugin answers (any result value), then:
 |---|---|---|
 | plugin → host | `agent/turn` | `{ prompt }` → `{ turn }`: runs one full agent turn (tool loop included), streaming progress as `agent/event` notifications |
 | host → plugin | `agent/event` | `{ turn, event }`: one `AgentEvent` (`text` / `thinking` / `tool_use` / `tool_result` / `usage` / `error` / `workflow` / `agent`) |
+| plugin → host | `agent/abort` | `{}` → `{ aborted }`: stops the in-flight turn (the TUI's `esc`); `aborted: false` when nothing is running |
 | plugin → host | `tools/list` | `{}` → `{ tools }` (Anthropic-format schemas) |
 | plugin → host | `tools/call` | `{ name, input }` → the `ToolResult` |
 | plugin → host | `config/get` | `{}` → the effective `AppConfig` (apiKey stripped) |
@@ -177,11 +178,22 @@ version } }` — which the plugin answers (any result value), then:
 Rules of the road:
 
 - `entry.json` form: `"launcher": { "command": "node", "args":
-  ["launcher.js"] }`. Relative `command`/`args` resolve against the **entry
-  dir** (shipped plugin files live there); `cwd` defaults to the entry dir;
-  optional `env` adds variables. `meowcode entry install` copies these
-  referenced files into the entry, as it does for relative `mcpServers` args.
+  ["launcher.js"] }`. A relative `command`/`args` string that names a **file in
+  the entry dir** is anchored there — that is where the installer puts it — while
+  anything else (a bare `node`/`bun` on `PATH`, a flag, a path for the launched
+  program itself) is passed through untouched. `cwd` defaults to the entry dir; a
+  relative `cwd` is written through as-is, and `spawn` resolves it against the
+  *parent's* cwd, so `"cwd": "."` is how a manifest asks for the session's own
+  directory. Optional `env` adds variables. `meowcode entry install` copies the
+  files referenced by relative `launcher.args` into the entry, as it does for
+  relative `mcpServers` args.
 - One turn at a time — a second `agent/turn` while one streams is rejected.
+  `agent/abort` stops the running one: the pending `agent/turn` still resolves
+  with `{ turn }`, the partial answer is committed with `meta.interrupted`, and no
+  `⚠` error row is added — so a plugin learns the turn is over from the turn's
+  own resolution and needs no abort event. The bridge reads lines one at a time,
+  so an abort sent before `agent/turn` has installed its controller finds nothing
+  to stop and answers `{ aborted: false }`.
 - Headless: turns run with `bypassPermissions` (the plugin owns interaction and
   gates before calling), but the entry's `permissions` deny/allow rules still
   bind. Hooks fire when the entry brings them; there is nobody to answer
@@ -194,6 +206,14 @@ Rules of the road:
   once its handshake completes (same "next turn" semantics as the TUI), so a
   plugin should re-list before its first `agent/turn` if it needs them.
 - `/entry` and `meowcode entry list` mark these entries `[launcher]`.
+
+Known gaps, for plugin authors who need to plan around them: the host never
+reports the **session cwd** (declare `"cwd": "."` in `launcher` — a relative cwd
+resolves against the parent's, so that yields the session's own directory; omit
+it and `process.cwd()` is the entry dir), there is **no interactive permission
+prompt** (an `ask` decision falls through to allow), abort produces **no event**
+(only the turn's resolution), and there is **no `fs/*` method** — read what the
+host's tools would, or read the filesystem directly.
 
 Minimal plugin sketch (node) — answer `initialize`, run one turn, exit (the
 host saves the transcript):
