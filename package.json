@@ -1,6 +1,6 @@
 {
   "name": "meowcode",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MeowCode — a Claude Code–style agentic coding CLI (framework skeleton).",
   "type": "module",
   "bin": {
