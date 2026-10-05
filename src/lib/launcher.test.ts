@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
-import { readLauncherConfig, runLauncher } from './launcher'
+import { readLauncherConfig, runLauncher, type LauncherConfig } from './launcher'
 import type { AppConfig, Message } from '../types'
 
 describe('readLauncherConfig', () => {
@@ -367,4 +367,50 @@ describe('launcher bridge (real child process)', () => {
       expect('apiKey' in rec.snapshot.config).toBe(false)
     }, { timeout: 15_000 })
   }, 30_000)
+})
+
+// A launcher that dies during startup is the failure this suite could not see for
+// the longest, because it looks exactly like a slow one: the child's exit resolves
+// in tens of milliseconds, but nothing was waiting on that promise — the handshake
+// was, and it waits out REQUEST_TIMEOUT_MS because the write into a dead child's
+// stdin reports no error. So the host sits in epoll for ten minutes with the
+// launcher's own error already printed above it.
+//
+// The budget here is deliberately far above the ~100ms this actually takes: a test
+// that fails only on a loaded CI box is a test nobody trusts.
+describe('a launcher that exits before the handshake', () => {
+  /**
+   * `runLauncher` ends a failed launch with `process.exit`, by design: the CLI's
+   * contract is that the host's exit code IS the launcher's. So the observation has
+   * to be made at that seam rather than from the return value, which is only
+   * reachable when the launcher succeeded.
+   */
+  async function runAndCaptureExit(cfg: LauncherConfig): Promise<{ code: number; ms: number }> {
+    const real = process.exit
+    let seen: number | null = null
+    process.exit = ((code?: number) => { seen = code ?? 0 }) as never
+    const started = Date.now()
+    try {
+      await runLauncher(cfg, CONFIG)
+    } finally {
+      process.exit = real
+    }
+    return { code: seen ?? 0, ms: Date.now() - started }
+  }
+
+  it('gives up on the handshake and exits with a failure, in milliseconds', async () => {
+    const dead = path.join(HOME, 'dead-launcher.cjs')
+    fs.writeFileSync(dead, 'process.exit(3)\n')
+    const { code, ms } = await runAndCaptureExit({ command: process.execPath, args: [dead], cwd: WORK })
+    expect(code).not.toBe(0)
+    expect(ms).toBeLessThan(30_000)
+  }, 60_000)
+
+  it('survives a command that does not exist at all', async () => {
+    // 'error' rather than 'exit' — spawn fails asynchronously, so this is the other
+    // half of the same hang and the same fix.
+    const { code, ms } = await runAndCaptureExit({ command: path.join(HOME, 'no-such-binary'), cwd: WORK })
+    expect(code).not.toBe(0)
+    expect(ms).toBeLessThan(30_000)
+  }, 60_000)
 })

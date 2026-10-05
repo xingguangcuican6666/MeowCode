@@ -111,6 +111,17 @@ function replyError(l: LauncherSession, id: number, message: string): void {
   l.child.stdin?.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message } }) + '\n')
 }
 
+/** Fail every in-flight request, because the pipe they are waiting on is gone. */
+function rejectPending(l: LauncherSession, why: string): void {
+  for (const [, p] of l.pending) {
+    // The timer too: a cleared map with 600-second timers still holding the event
+    // loop open is the same hang by another route.
+    clearTimeout(p.timer)
+    p.reject(new LauncherError(why))
+  }
+  l.pending.clear()
+}
+
 // One inbound line: a response (has id) resolves a pending host request; a
 // request (has method) is the plugin calling into the host. Errors come back
 // as JSON-RPC errors, never as throws, so one bad call can't take the bridge
@@ -404,9 +415,28 @@ export async function runLauncher(cfg: LauncherConfig, config: AppConfig): Promi
   // turn. Entry-relative args were already anchored by applyEntryOverrides.
   startMcpServers(process.cwd())
 
+  // The child exiting is the end of the conversation, whatever we were waiting for.
+  //
+  // Without this the handshake below is what a failed launch waits on, and it waits
+  // for REQUEST_TIMEOUT_MS — ten minutes — because nothing on the pending side ever
+  // hears about the death. The write into the child's stdin succeeds (it lands in a
+  // pipe whose reader end is already gone; the callback reports no error, since a
+  // pipe accepts bytes until it doesn't), no reply is ever read, and `exited` — the
+  // promise that WOULD have resolved in 40ms — is not awaited until the handshake
+  // gives up. Measured: a launcher that exits 1 at startup leaves the host spinning
+  // in epoll for the full timeout, holding the terminal, with a plausible-looking
+  // error on screen. That is a real class of failure, not a hypothetical one — the
+  // webui prints exactly this and exits 1 whenever its port is taken.
   const exited = new Promise<number>((resolve) => {
-    child.on('exit', (code) => resolve(code ?? 1))
-    child.on('error', (e) => { process.stderr.write(`launcher failed: ${e.message}\n`); resolve(1) })
+    const finish = (code: number) => {
+      rejectPending(session, 'the launcher exited before answering')
+      resolve(code)
+    }
+    child.on('exit', (code) => finish(code ?? 1))
+    child.on('error', (e) => {
+      process.stderr.write(`launcher failed: ${e.message}\n`)
+      finish(1)
+    })
   })
 
   // Handshake: announce the host so the plugin can version itself against it.
