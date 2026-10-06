@@ -21,9 +21,15 @@ function buildReply(userText: string): string {
     quoted,
     '',
     'Real tool calls work offline too — try:',
+    '- `todo: task 1, task 2` to exercise **todo_write** (task checklist card)',
     '- `run: ls -la` to exercise the **bash** tool',
     '- `read: package.json` to exercise **read_file**',
+    '- `search: <query>` to exercise **web_search**',
+    '- `ask: <question>` to exercise **ask_user**',
+    '- `diff: demo` to view unified git diff',
     '- `ls: src` to exercise **list_dir**',
+    '- `workflow: task1, task2` for multi-agent workflows',
+    '- `task: <label>` / `plan: <label>` for switchable sub-agents',
     '',
     'Set `ANTHROPIC_API_KEY` and `/provider anthropic` for a real model.',
   ].join('\n')
@@ -259,6 +265,101 @@ async function* agent(messages: Message[], opts: StreamOpts): AsyncGenerator<Age
     yield { type: 'tool_result', id, name: 'edit_file', content: 'edited src/greeter.ts (1 replacement)', linesAdded: 1, linesRemoved: 1, diff: demoDiff }
     for await (const ev of streamText(`\n\nThat's the diff view above.`, opts)) yield ev
     return
+  }
+
+  // `todo:` / `todos:` / `checklist:` — demo todo_write and task checklist card
+  {
+    const m = /^(?:todo|todos|checklist):\s*([\s\S]*)/i.exec(trimmed)
+    if (m) {
+      const raw = m[1].trim()
+      const items = raw
+        ? raw.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean)
+        : [
+            'Analyze project architecture and tool schemas',
+            'Implement M3E tool call cards for todo_write',
+            'Integrate mock provider triggers & test flow',
+            'Verify responsive layout & unit tests',
+          ]
+
+      for await (const ev of streamThinking(`Planning multi-step work with task checklist...`, opts)) yield ev
+      if (opts.signal?.aborted) return
+
+      for await (const ev of streamText(`Initializing task list via \`todo_write\`:`, opts)) yield ev
+      if (opts.signal?.aborted) return
+
+      const id1 = `mock_todo_${Date.now?.() ?? '0'}`
+      const initialTodos = items.map((content, idx) => ({
+        content,
+        status: (idx === 0 ? 'in_progress' : 'pending') as 'in_progress' | 'pending',
+        activeForm: idx === 0 ? `Working on: ${content}` : undefined,
+      }))
+      yield { type: 'tool_use', id: id1, name: 'todo_write', input: { todos: initialTodos } }
+      const res1 = await runTool('todo_write', { todos: initialTodos }, { cwd, signal: opts.signal })
+      if (opts.signal?.aborted) return
+      yield { type: 'tool_result', id: id1, name: 'todo_write', content: res1.content }
+
+      await sleep(700, opts.signal)
+      if (opts.signal?.aborted) return
+
+      // Progress first item to completed, second to in_progress
+      const id2 = `mock_todo_${(Date.now?.() ?? 0) + 1}`
+      const progressedTodos = items.map((content, idx) => ({
+        content,
+        status: (idx === 0 ? 'completed' : (idx === 1 ? 'in_progress' : 'pending')) as 'completed' | 'in_progress' | 'pending',
+        activeForm: idx === 1 ? `Working on: ${content}` : undefined,
+      }))
+      yield { type: 'tool_use', id: id2, name: 'todo_write', input: { todos: progressedTodos } }
+      const res2 = await runTool('todo_write', { todos: progressedTodos }, { cwd, signal: opts.signal })
+      if (opts.signal?.aborted) return
+      yield { type: 'tool_result', id: id2, name: 'todo_write', content: res2.content }
+
+      for await (const ev of streamText(`\n\nTask list initialized and advancing live.`, opts)) yield ev
+      return
+    }
+  }
+
+  // `search:` / `web:` — demo web_search tool
+  {
+    const m = /^(?:search|web):\s*(.+)/i.exec(trimmed)
+    if (m) {
+      const q = m[1].trim()
+      for await (const ev of streamText(`Searching web for \`${q}\`:`, opts)) yield ev
+      if (opts.signal?.aborted) return
+      const id = `mock_search_${Date.now?.() ?? '0'}`
+      yield { type: 'tool_use', id, name: 'web_search', input: { query: q } }
+      await sleep(500, opts.signal)
+      const simulatedResult = `Top results for "${q}":\n1. Material Design 3 Expressive Guidelines\n2. Web Components & Custom Elements Standard\n3. Modern Layout & Micro-animations Handbook`
+      yield { type: 'tool_result', id, name: 'web_search', content: simulatedResult }
+      for await (const ev of streamText(`\n\nSearch complete. Found top references above.`, opts)) yield ev
+      return
+    }
+  }
+
+  // `ask:` — demo ask_user tool
+  {
+    const m = /^ask:\s*(.+)/i.exec(trimmed)
+    if (m) {
+      const q = m[1].trim()
+      for await (const ev of streamText(`Prompting user for decision:`, opts)) yield ev
+      if (opts.signal?.aborted) return
+      const id = `mock_ask_${Date.now?.() ?? '0'}`
+      const askInput = {
+        questions: [
+          {
+            question: q,
+            options: [
+              { label: 'Option A: Recommended setup', description: 'Apply recommended defaults automatically' },
+              { label: 'Option B: Custom step-by-step', description: 'Configure granular options interactively' },
+            ],
+          },
+        ],
+      }
+      yield { type: 'tool_use', id, name: 'ask_user', input: askInput }
+      await sleep(600, opts.signal)
+      yield { type: 'tool_result', id, name: 'ask_user', content: 'User selected Option A: Recommended setup' }
+      for await (const ev of streamText(`\n\nUser input received and processed.`, opts)) yield ev
+      return
+    }
   }
 
   const triggers: Array<[RegExp, string, (v: string) => Record<string, unknown>]> = [

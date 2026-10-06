@@ -208,6 +208,53 @@ export function latestSession(cwd: string | null = process.cwd()): SessionMeta |
   return listSessions(cwd)[0] ?? null
 }
 
+// Delete a saved session by id. Returns true if removed, false if not found.
+export function deleteSession(id: string): boolean {
+  try {
+    const file = fileFor(id)
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file)
+      lastTitleCount.delete(id)
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+// Rename a saved session's title. Returns true on success, false if missing.
+export function renameSession(id: string, newTitle: string, initialSnap?: SessionSnapshot): boolean {
+  try {
+    const trimmed = newTitle.trim()
+    if (!trimmed) return false
+    const rec = readFile(id)
+    if (rec) {
+      rec.title = trimmed
+      rec.savedAt = Date.now()
+      fs.writeFileSync(fileFor(id), JSON.stringify(rec))
+      return true
+    }
+    if (initialSnap) {
+      fs.mkdirSync(sessionsDir(), { recursive: true })
+      const { apiKey: _omit, ...config } = initialSnap.config
+      const newRec: SavedSession = {
+        id,
+        savedAt: Date.now(),
+        cwd: process.cwd(),
+        title: trimmed,
+        messageCount: realCount(initialSnap),
+        snapshot: { ...initialSnap, config: config as SessionSnapshot['config'] },
+      }
+      fs.writeFileSync(fileFor(id), JSON.stringify(newRec))
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 // Trim each workspace to MAX_PER_WORKSPACE, deleting its oldest files. Grouped
 // by cwd so a busy project never evicts another project's saved sessions. Also
 // applies the `cleanupPeriodDays` retention policy across ALL workspaces: any

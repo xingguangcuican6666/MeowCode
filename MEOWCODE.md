@@ -170,6 +170,13 @@ src/
     orchestration.ts    task / plan / workflow / agent_status / agent_wait
     permission.ts       permission-mode + per-tool rules (allow/ask/deny)
     memory-tool.ts      the cross-session `memory` tool
+  webui/                the built-in WebUI front-end & Extension SDK
+    index.ts            startWebUI, createWebUIServer, exports
+    server.ts           HTTP & SSE server (node:http, zero external dependencies)
+    agent-bridge.ts     headless agent execution bridge
+    plugin-manager.ts   backend plugin manager & extension route dispatcher
+    plugins/            showcase plugins: workspace-files, tools-inspector, prompt-templates, metrics-monitor
+    client/             SPA HTML layout, Vanilla CSS design system, window.MeowSDK client, app logic
   lib/                  ~60 leaf modules (agents, mcp, sessions, transcript, i18n,
                         compact, summarize, usage, tokens, mentions, hooks, …)
 ```
@@ -178,7 +185,14 @@ The **agent loop** lives in `src/providers/anthropic.ts` (`agent(...)`): it buil
 the tool schemas, streams SSE, runs tools, handles retries / context-overflow
 compaction / OAuth refresh / plan-mode approval. The mock provider (`mock.ts`)
 implements a synthetic offline loop over the same tools, so the UI works without a
-key. The **UI is entirely Ink + React** (v18, `~18.3.1` react, `~5.1.0` ink).
+key. The **UI is entirely Ink + React** (v18, `~18.3.1` react, `~5.1.0` ink) for the
+TUI, and a high-aesthetic **built-in WebUI** (`src/webui/`, started via `meowcode web`,
+`meowcode webui`, `--web`, or `/web`) adhering to Google's **Material 3 Expressive (M3E)**
+design specification (tonal surface containers 0-5, expressive curvatures, spring motion,
+light/dark/system theme switching, and official `@material/web` web components).
+It includes reserved extension slots (`header:*`, `sidebar:*`, `chat:*`, `message:*`, `statusbar:*`),
+custom panels, tool visualizers, `window.MeowSDK` (with `sdk.theme`, `sdk.slots`, `sdk.panels`,
+`sdk.tools`, `sdk.commands`, `sdk.ui`, and `sdk.m3`), and backend plugin hooks (`WebUIPlugin`).
 
 ## Conventions
 

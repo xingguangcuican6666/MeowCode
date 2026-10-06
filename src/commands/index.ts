@@ -1368,7 +1368,25 @@ const entry: SlashCommand = {
   },
 }
 
-const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, entry, resume, fork, version, exit]
+const webCmd: SlashCommand = {
+  name: 'web',
+  aliases: ['webui'],
+  get description() { return t('cmd.webDesc') },
+  async run(ctx) {
+    const rawPort = ctx.args.trim()
+    const port = rawPort ? parseInt(rawPort, 10) : 4040
+    ctx.print(t('cmd.webStarting', { url: `http://127.0.0.1:${port}` }), 'system')
+    try {
+      const { startWebUI } = await import('../webui')
+      const instance = await startWebUI({ config: ctx.config, port, openBrowser: true })
+      ctx.print(t('cmd.webReady', { url: instance.url }), 'system')
+    } catch (e: any) {
+      ctx.print(t('cmd.webFailed', { error: e.message || String(e) }), 'system', { error: true })
+    }
+  },
+}
+
+const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, entry, resume, fork, version, exit, webCmd]
 
 // Merge user-defined commands (from ~/.meowcode/commands and ./.meowcode/commands)
 // into the registry, but never let them shadow a built-in name or alias. Loaded

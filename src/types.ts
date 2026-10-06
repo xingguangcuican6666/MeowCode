@@ -96,6 +96,11 @@ export interface MessageMeta {
   // dim event line (▸ …), never as a "> " prompt. This is what actually wakes an idle
   // session to react — displaying alone never did (see app.tsx idle driver).
   wakeup?: boolean
+  // Tool invocation & inspection metadata (for WebUI / custom cards persistence)
+  toolName?: string
+  toolInput?: Record<string, unknown>
+  toolContent?: string
+  toolDisplay?: string
 }
 
 export interface Message {

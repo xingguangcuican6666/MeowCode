@@ -63,6 +63,8 @@ function printHelp(): void {
 
 Usage:
   meowcode                      Start an interactive session
+  meowcode web [--port N]       Start the built-in WebUI front-end
+  meowcode webui                Alias for \`meowcode web\`
   meowcode -p "<prompt>"        Print mode: one-shot, non-interactive
   echo "<prompt>" | meowcode    Same, reading the prompt from stdin
   meowcode <entry>              Same as --entry <entry> (shorthand)
@@ -72,6 +74,10 @@ Options:
   -c, --continue         Resume the most recent session
       --resume [id]      Resume a saved session (the latest, or the given id)
       --fork-session [id]  Open a copy of a saved session, leaving the original intact
+      --web              Start the built-in WebUI front-end
+      --port <number>    Port for the WebUI (default: 4040)
+      --host <host>      Host for the WebUI (default: 127.0.0.1)
+      --no-open          Do not automatically open the browser in web mode
       --model <id>       Model to use for this run
       --provider <id>    Provider to use (mock | anthropic)
       --entry <name>      Start the named entry (a front-end of its own)
@@ -387,6 +393,30 @@ async function askLegacyDir(info: LegacyDirInfo): Promise<LegacyChoice> {
 async function main(): Promise<void> {
   if (has('-h', '--help')) { printHelp(); return }
   if (has('-v', '--version')) { process.stdout.write(VERSION + '\n'); return }
+
+  // WebUI command / --web flag: start the built-in WebUI server
+  if (argv[0] === 'web' || argv[0] === 'webui' || has('--web')) {
+    const portVal = flagValue('--port')
+    const hostVal = flagValue('--host')
+    const port = portVal ? parseInt(portVal, 10) : 4040
+    const host = hostVal || '127.0.0.1'
+    const openBrowser = !has('--no-open')
+    const config = loadConfig()
+    const model = flagValue('--model')
+    if (model) config.model = model
+    const provider = flagValue('--provider')
+    if (provider) config.provider = provider
+
+    process.stdout.write('Starting MeowCode Built-in WebUI...\n')
+    const { startWebUI } = await import('./webui')
+    const instance = await startWebUI({ port, host, openBrowser, config })
+    process.stdout.write(`\n🐾 MeowCode WebUI listening at: ${instance.url}\n`)
+    process.stdout.write(`• Extension slots active: header, sidebar, chat, message, panels, statusbar\n`)
+    process.stdout.write(`• Browser SDK: window.MeowSDK\n`)
+    process.stdout.write(`• Built-in showcase plugins: Workspace Files, Tools Inspector, Prompt Templates, Metrics Monitor\n`)
+    process.stdout.write(`Press Ctrl+C to terminate.\n\n`)
+    return
+  }
 
   // Language + palette for the migration dialog below. Read straight off disk
   // rather than through loadConfig(): this runs before the entry is resolved,

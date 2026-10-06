@@ -263,6 +263,10 @@ export const messages = {
   // __I18N_APPEND3__
   // commands (src/commands/index.ts)
   'cmd.helpDesc': { zh: '显示可用命令', en: 'Show available commands' },
+  'cmd.webDesc': { zh: '启动内置 WebUI 前端服务（带扩展插槽与 SDK 支持）', en: 'Launch the built-in WebUI front-end server (with extension slots & SDK)' },
+  'cmd.webStarting': { zh: '正在启动内置 WebUI 服务：{url}...', en: 'Starting built-in WebUI server on {url}...' },
+  'cmd.webReady': { zh: '🐾 内置 WebUI 已就绪：{url}（插槽和 SDK 已激活）', en: '🐾 Built-in WebUI ready at {url} (extension slots & SDK active)' },
+  'cmd.webFailed': { zh: '启动 WebUI 失败：{error}', en: 'Failed to start WebUI: {error}' },
   'cmd.helpTitle': { zh: '**MeowCode 命令**', en: '**MeowCode commands**' },
   'cmd.clearDesc': { zh: '清空对话和屏幕', en: 'Clear the conversation and screen' },
   'cmd.newDesc': { zh: '开始一个新会话（当前会话仍会保存，可用 /resume 恢复）', en: 'Start a new session (the current one stays saved and reopenable via /resume)' },
