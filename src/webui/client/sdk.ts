@@ -622,13 +622,26 @@ export const CLIENT_SDK_JS = `/**
   };
 
   // --- API Client ---
+  // This run's API token, embedded in the page by the server. Sent on every call;
+  // the server refuses /api without it (see webui/server.ts).
+  const API_TOKEN = typeof window !== 'undefined' && window.__MEOWCODE_API_TOKEN__ ? window.__MEOWCODE_API_TOKEN__ : '';
+
+  // EventSource can't set headers, so the token rides in the query string there.
+  function withToken(endpoint) {
+    if (!API_TOKEN) return endpoint;
+    return endpoint + (endpoint.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(API_TOKEN);
+  }
+
   async function apiFetch(endpoint, options = {}) {
     // Every API call waits on the cookie exchange, so no caller has to remember.
     await authReady;
     const res = await fetch(endpoint, {
       ...options,
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(API_TOKEN ? { 'X-MeowCode-Token': API_TOKEN } : {}),
+        ...(options.headers || {}),
+      },
     });
     if (!res.ok) {
       let errText = res.statusText;

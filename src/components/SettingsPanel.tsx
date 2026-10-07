@@ -8,7 +8,8 @@ import { providerIds } from '../providers'
 import { DEFAULT_THEME } from '../theme'
 import { VERSION, NAME } from '../version'
 import { displayWidth, fitToWidth } from '../lib/text'
-import { settingLabel, settingDesc, type Lang, type MessageKey } from '../lib/i18n'
+import { rankMatches } from '../lib/search'
+import { settingLabel, settingDesc, bothLangs, type Lang, type MessageKey } from '../lib/i18n'
 import { useT, useLang } from '../hooks/useT'
 import {
   SETTINGS, type SettingSpec, getSetting, coerceSetting, settingHint,
@@ -51,10 +52,17 @@ const TABS: { id: PanelTab; labelKey: MessageKey }[] = [
 
 // A row on an editable tab: a schema-backed setting, a core AppConfig field, or
 // a read-only line (the API key).
+//
+// `label` is what the row *displays* — one string, in the active language.
+// `terms` is what the search box *matches* — every language the row has text in,
+// so `lang` finds 「语言」 on an English UI and 「语言」 finds "Language" on a
+// Chinese one (see lib/search.ts). Kept apart on purpose: folding them into one
+// field would either leak the other language onto the screen or shrink the search
+// surface to whatever the current locale happens to be.
 type Row =
-  | { kind: 'setting'; key: string; label: string; spec: SettingSpec }
-  | { kind: 'core'; key: 'provider' | 'model' | 'theme' | 'system'; label: string; ctl: 'enum' | 'text'; values?: string[] }
-  | { kind: 'readonly'; key: string; label: string }
+  | { kind: 'setting'; key: string; label: string; terms: string[]; spec: SettingSpec }
+  | { kind: 'core'; key: 'provider' | 'model' | 'theme' | 'system'; label: string; terms: string[]; ctl: 'enum' | 'text'; values?: string[] }
+  | { kind: 'readonly'; key: string; label: string; terms: string[] }
 
 interface Props {
   tab: PanelTab
@@ -73,13 +81,21 @@ interface Props {
 // Core AppConfig fields shown on the Settings tab. provider/theme cycle through
 // their known values (provider ids include any custom Anthropic-protocol
 // providers, see providers/index.ts); model/system are free text.
+//
+// These rows have no per-field description (the hint line under the list explains
+// how to *edit* a row, not what it is), so their search surface is the label in
+// both languages — which is enough for `lang` ⇄ 「语言」 to find each other.
 function coreRows(config: AppConfig, t: Tr): Row[] {
+  const both = (key: MessageKey): string[] => {
+    const { zh, en } = bothLangs(key)
+    return zh === en ? [zh] : [zh, en]
+  }
   return [
-    { kind: 'core', key: 'provider', label: t('core.provider'), ctl: 'enum', values: providerIds(config) },
-    { kind: 'core', key: 'model', label: t('core.model'), ctl: 'text' },
-    { kind: 'core', key: 'theme', label: t('core.theme'), ctl: 'enum', values: [AUTO_THEME, ...themeList().map((t) => t.name)] },
-    { kind: 'core', key: 'system', label: t('core.system'), ctl: 'text' },
-    { kind: 'readonly', key: 'apiKey', label: t('core.apiKey') },
+    { kind: 'core', key: 'provider', label: t('core.provider'), terms: both('core.provider'), ctl: 'enum', values: providerIds(config) },
+    { kind: 'core', key: 'model', label: t('core.model'), terms: both('core.model'), ctl: 'text' },
+    { kind: 'core', key: 'theme', label: t('core.theme'), terms: both('core.theme'), ctl: 'enum', values: [AUTO_THEME, ...themeList().map((t) => t.name)] },
+    { kind: 'core', key: 'system', label: t('core.system'), terms: both('core.system'), ctl: 'text' },
+    { kind: 'readonly', key: 'apiKey', label: t('core.apiKey'), terms: both('core.apiKey') },
   ]
 }
 
@@ -87,18 +103,26 @@ function coreRows(config: AppConfig, t: Tr): Row[] {
 // (provider/model/theme/system/apiKey) and then the schema-backed settings, so
 // everything editable lives on one tab under the "Settings" title. Setting labels
 // are localized (zh from the i18n table, falling back to the spec's English).
+//
+// A setting's search surface is label+description in BOTH languages. English lives
+// on the SettingSpec itself, which is why `settingLabel('zh', key, s.label)` is
+// the way to reach it rather than a second table to keep in sync. The group name
+// ('Context & model') is deliberately NOT searched: it is a display-time grouping
+// with no translation, so matching it would surface rows by an English word the
+// user cannot see.
 function rowsForTab(tab: PanelTab, config: AppConfig, t: Tr, lang: Lang): Row[] {
   if (tab === 'config' || tab === 'settings') {
     return [
       ...coreRows(config, t),
       // surfaces:['web'] rows are browser-only (chat width, speech, …); a
       // terminal has nothing to apply them to, so they stay out of this tab.
-      ...SETTINGS.filter((s) => !s.surfaces?.includes('web')).map((s) => ({
-        kind: 'setting' as const,
-        key: s.key,
-        label: settingLabel(lang, s.key, s.label),
-        spec: s,
-      })),
+      // Each row carries its own search surface: label+description in BOTH
+      // languages (see the note above rowsForTab).
+      ...SETTINGS.filter((s) => !s.surfaces?.includes('web')).map((s) => {
+        const label = settingLabel(lang, s.key, s.label)
+        const terms = [settingLabel('zh', s.key, s.label), settingDesc('zh', s.key, s.description), s.label, s.description]
+        return { kind: 'setting' as const, key: s.key, label, terms, spec: s }
+      }),
     ]
   }
   return []
@@ -240,8 +264,10 @@ export function SettingsPanel(props: Props): React.ReactElement {
   // isn't stable across renders, so `lang` is the real dependency).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const allRows = useMemo(() => rowsForTab(tab, config, t, lang), [tab, config, lang])
-  const q = search.trim().toLowerCase()
-  const filtered = q ? allRows.filter((r) => r.label.toLowerCase().includes(q)) : allRows
+  const filtered = useMemo(
+    () => rankMatches(allRows, search, (r) => r.terms.map((text) => ({ text }))),
+    [allRows, search],
+  )
   const cur = Math.min(cursor, Math.max(0, filtered.length - 1))
   const focused: Row | undefined = filtered[cur]
   const labelW = Math.min(38, Math.max(8, ...allRows.map((r) => displayWidth(r.label))))

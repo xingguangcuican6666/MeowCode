@@ -2740,7 +2740,9 @@ export const CLIENT_APP_JS = `/**
 
   // --- SSE Event Stream ---
   function connectSSE() {
-    const sse = new EventSource('/api/events');
+    // EventSource can't send headers, so the token goes in the query string.
+    const sseToken = typeof window !== 'undefined' && window.__MEOWCODE_API_TOKEN__ ? window.__MEOWCODE_API_TOKEN__ : '';
+    const sse = new EventSource(sseToken ? '/api/events?token=' + encodeURIComponent(sseToken) : '/api/events');
 
     sse.onopen = () => {
       connectionStatus.textContent = sdk.i18n.t('statusbar.connected');

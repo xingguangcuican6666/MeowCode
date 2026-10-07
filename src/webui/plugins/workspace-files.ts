@@ -208,14 +208,16 @@ export const workspaceFilesPlugin: WebUIPlugin = {
     read: (_req, _res, body, ctx) => {
       const relPath = String(body?.path || '')
       if (!relPath) throw new Error('Path required')
+      // Two complementary checks: realpathSync to resolve symlinks (a link inside
+      // the workspace pointing at ~/.ssh/id_rsa resolves outside and is rejected),
+      // AND path.relative to compare by segments (with root /p/proj, a string-prefix
+      // check would also accept /p/proj-secrets/… — a sibling, not a child).
       const root = fs.realpathSync(ctx.cwd)
       const target = path.resolve(root, relPath)
-      // Prefix-check the *resolved* path: a symlink inside the workspace pointing
-      // at ~/.ssh/id_rsa resolves outside and is rejected, where a check on the
-      // nominal path (what statSync sees) would wave it through. realpathSync
-      // also throws for a dangling link, which lands in the catch below.
       const real = fs.realpathSync(target)
-      if (real !== root && !real.startsWith(root + path.sep)) {
+      const rel = path.relative(root, real)
+      if ((real !== root && !real.startsWith(root + path.sep)) ||
+          (rel !== '' && (rel.startsWith('..') || path.isAbsolute(rel)))) {
         throw new Error('Access denied: path escapes workspace')
       }
       const stat = fs.lstatSync(real)

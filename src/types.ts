@@ -1,3 +1,8 @@
+// Type-only, so it costs nothing at runtime and cannot form an import cycle:
+// lib/i18n pulls in react for its LangContext, and nothing under lib/ imports
+// this file.
+import type { MessageKey } from './lib/i18n'
+
 export type Role = 'user' | 'assistant' | 'system' | 'tool'
 
 // One row of a unified diff for the write/edit diff view. `context` is an
@@ -197,8 +202,13 @@ export interface StreamOpts {
   // Persistent permission rules (the `permissions` config), layered on top of the
   // mode by the provider before each tool call. See AppConfig.permissions and
   // tools/permission matchPermissionRule. Threaded to sub-agents too (a deny rule
-  // must bind them), but sub-agents can't prompt so an 'ask' collapses to allow.
+  // must bind them); a sub-agent can't prompt, so an 'ask' is denied there.
   permissionRules?: { allow?: string[]; deny?: string[]; ask?: string[] }
+  // Restrict the tool schemas sent to the model to these names. Set for a custom
+  // sub-agent type that declares `tools:` in its front-matter (lib/agents) and for
+  // the read-only built-in roles — a sub-agent documented as read-only must not be
+  // handed write_file. Absent = the usual set for this agent level.
+  allowedTools?: string[]
 }
 
 // One pending permission prompt handed to the UI: which tool wants to run, its
@@ -464,9 +474,20 @@ export const COMMAND_CONTEXT_VALUE_MEMBERS = ['compact', 'openThemePicker', 'ope
 export interface SlashCommand {
   name: string
   aliases?: string[]
+  /**
+   * Where this command's description lives in the i18n catalog, so the `/` menu
+   * can search it in *both* languages. `description` itself is a getter that only
+   * ever renders the active one, which is right for display and useless for a
+   * search box — typing `/模型` has to find `/model` on an English UI.
+   *
+   * Optional because a user command from `~/.meowcode/commands/` has a free-text
+   * frontmatter description and no catalog entry; its text is still matched, just
+   * in one language.
+   */
+  descKey?: MessageKey
   description: string
   run: (ctx: CommandContext) => void | Promise<void>
 }
 
-/** The subset of a command the input's autocomplete menu needs to render. */
-export type CommandSpec = Pick<SlashCommand, 'name' | 'description' | 'aliases'>
+/** The subset of a command the input's autocomplete menu needs to render and filter. */
+export type CommandSpec = Pick<SlashCommand, 'name' | 'description' | 'aliases' | 'descKey'>

@@ -208,7 +208,12 @@ export function installEntry(spec: string, opts?: InstallOptions): string {
       const from = path.normalize(path.join(src.contentRoot, rel))
       if (!from.startsWith(src.contentRoot + path.sep)) return // escape attempt
       try { if (!fs.statSync(from).isFile()) return } catch { return }
-      const to = path.join(dir, rel)
+      // `rel` comes from the installed package's own entry.json, so check the
+      // DESTINATION too and not just the source: the two only happen to escape
+      // together, and relying on that coincidence is one refactor away from
+      // writing outside the entry directory.
+      const to = path.normalize(path.join(dir, rel))
+      if (!to.startsWith(path.resolve(dir) + path.sep)) return
       if (fs.existsSync(to)) return
       fs.mkdirSync(path.dirname(to), { recursive: true })
       fs.copyFileSync(from, to)

@@ -52,7 +52,25 @@ export function newSessionId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-const fileFor = (id: string): string => path.join(sessionsDir(), `${id}.json`)
+// Session ids reach us from outside: a `--resume <id>` argument and the WebUI's
+// /api/session/{load,rename,delete} request bodies. They are interpolated into a
+// filename, so anything that isn't a plain id (a separator, a `..`, a NUL) is
+// rejected here rather than resolved — `../../../x` would otherwise read, rename
+// or DELETE a .json file outside the sessions directory.
+const ID_RE = /^[A-Za-z0-9._-]{1,128}$/
+export function isValidSessionId(id: string): boolean {
+  return ID_RE.test(id) && id !== '.' && id !== '..' && !id.startsWith('.')
+}
+
+/** The file holding a session, or null when the id isn't a usable filename. */
+const fileForSafe = (id: string): string | null =>
+  isValidSessionId(id) ? path.join(sessionsDir(), `${id}.json`) : null
+
+const fileFor = (id: string): string => {
+  const f = fileForSafe(id)
+  if (!f) throw new Error(`invalid session id: ${JSON.stringify(id.slice(0, 40))}`)
+  return f
+}
 
 // A short one-line title from the first real user message (commands/blank skipped).
 // Kept as the synchronous fallback when the model summarizer is unavailable.

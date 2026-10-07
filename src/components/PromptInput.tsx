@@ -2,8 +2,10 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Box, Text, useInput, useStdin, useStdout } from 'ink'
 import { symbols, useTheme } from '../theme'
 import { useT } from '../hooks/useT'
+import { bothLangs } from '../lib/i18n'
 import type { CommandSpec } from '../types'
 import { toGraphemes, truncateToWidth, displayWidth } from '../lib/text'
+import { rankMatches, NAME, DESC, type SearchField } from '../lib/search'
 import { loadHistory, appendHistory } from '../lib/history'
 import { copyToClipboard } from '../lib/clipboard'
 import { stashClipboardImage } from '../lib/images'
@@ -87,20 +89,33 @@ function atToken(g: string[], cursor: number): { start: number; query: string } 
   return { start: s, query: g.slice(s + 1, cursor).join('') }
 }
 
-// Prefix matches first (ranked the way a user expects), then looser substring
-// matches, so `/mod` surfaces `model` at the top and `/x` still finds anything
-// containing an "x". Matching considers aliases too.
-function filterCommands(commands: readonly CommandSpec[], query: string): CommandSpec[] {
-  const q = query.toLowerCase()
-  if (!q) return [...commands]
-  const starts: CommandSpec[] = []
-  const contains: CommandSpec[] = []
-  for (const c of commands) {
-    const names = [c.name, ...(c.aliases ?? [])].map((n) => n.toLowerCase())
-    if (names.some((n) => n.startsWith(q))) starts.push(c)
-    else if (names.some((n) => n.includes(q))) contains.push(c)
+// Every text form of a command that the `/` menu can match against: its name and
+// aliases at full weight, plus the catalog description in BOTH languages at
+// description weight. The description is what makes `/模型` and `/设置` work —
+// neither string exists in the other language's UI, but both are in the catalog.
+function commandFields(c: CommandSpec): SearchField[] {
+  const fields: SearchField[] = [
+    { text: c.name, weight: NAME },
+    { text: c.description, weight: DESC },
+  ]
+  for (const a of c.aliases ?? []) fields.push({ text: a, weight: NAME })
+  if (c.descKey) {
+    const both = bothLangs(c.descKey)
+    fields.push({ text: both.zh, weight: DESC }, { text: both.en, weight: DESC })
   }
-  return [...starts, ...contains]
+  return fields
+}
+
+/**
+ * Rank commands against what was typed after the `/`.
+ *
+ * Names and aliases are weighted above descriptions, which is what preserves the
+ * ranking people already rely on: `/mod` puts `model` first, `/co` puts `copy`
+ * ahead of `config`. Descriptions are searched, not displayed — the row still
+ * shows `c.description`, which follows the active language.
+ */
+function filterCommands(commands: readonly CommandSpec[], query: string): CommandSpec[] {
+  return rankMatches(commands, query, commandFields)
 }
 
 export function PromptInput({ active, placeholder, width, commands, atFiles, onSubmit, recallPending, onOverflowDown, onLeftAtStart, editorMode = 'normal', screenRows = 0, bottomOffset = 0, mouseSelect = false, copyOnSelect = false }: Props): React.ReactElement {

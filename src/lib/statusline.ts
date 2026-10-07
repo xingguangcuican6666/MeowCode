@@ -4,7 +4,7 @@
 // provider, cwd, version, session token/turn totals) and prints its status to
 // stdout; we take the first non-empty line. Shelling out per render would be far
 // too costly, so the caller runs this on a slow poll and caches the last line.
-import { spawn } from 'node:child_process'
+import { runCaptured } from './shell'
 
 export interface StatusLineContext {
   model: string
@@ -21,23 +21,11 @@ const RUN_TIMEOUT_MS = 5_000
 // Run the command and resolve to its first non-empty stdout line, or null if it
 // failed, timed out, or printed nothing. Never rejects — a broken status-line
 // command must not crash the app; it just yields no line.
-export function runStatusLine(command: string, ctx: StatusLineContext, signal?: AbortSignal): Promise<string | null> {
-  return new Promise((resolve) => {
-    let out = ''
-    let done = false
-    const finish = (v: string | null): void => { if (!done) { done = true; resolve(v) } }
-    let child
-    try {
-      child = spawn('/bin/bash', ['-c', command], { stdio: ['pipe', 'pipe', 'ignore'], signal })
-    } catch { finish(null); return }
-    const timer = setTimeout(() => { try { child.kill('SIGTERM') } catch {}; finish(null) }, RUN_TIMEOUT_MS)
-    child.stdout?.on('data', (d: Buffer) => { out += d.toString() })
-    child.on('error', () => { clearTimeout(timer); finish(null) })
-    child.on('close', () => {
-      clearTimeout(timer)
-      const line = out.split('\n').map((l) => l.trimEnd()).find((l) => l.trim().length > 0)
-      finish(line ? line.trim() : null)
-    })
-    try { child.stdin?.write(JSON.stringify(ctx)); child.stdin?.end() } catch {}
+export async function runStatusLine(command: string, ctx: StatusLineContext, signal?: AbortSignal): Promise<string | null> {
+  const r = await runCaptured(command, {
+    signal, timeoutMs: RUN_TIMEOUT_MS, input: JSON.stringify(ctx), headChars: 16_000, tailChars: 1_000,
   })
+  if (r.error || r.timedOut || r.aborted) return null
+  const line = r.stdout.split('\n').map((l) => l.trimEnd()).find((l) => l.trim().length > 0)
+  return line ? line.trim() : null
 }

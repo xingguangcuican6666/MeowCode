@@ -279,15 +279,27 @@ export interface WebUIOptions {
   config?: AppConfig
   plugins?: WebUIPlugin[]
   /**
-   * Skip token authentication. This is the "reach it from anywhere on purpose"
-   * switch (another device, a tunnel, `--host 0.0.0.0`): it hands the agent to
-   * anyone who can open the port, so it must be asked for explicitly and is
-   * never the default. The origin allowlist stays on either way.
+   * Access control for the /api routes. The server drives the agent with
+   * bypassPermissions and `/api/tools/call` reaches any tool, so a per-run token
+   * is required by default; the served page embeds it, so opening the printed URL
+   * just works. `auth: false` disables the check — only for a trusted, isolated
+   * context (e.g., behind a reverse proxy that already authenticated). This is
+   * the "reach it from anywhere on purpose" switch: it hands the agent to anyone
+   * who can open the port, so it must be asked for explicitly and is never the
+   * default. The origin allowlist stays on either way.
    */
-  noAuth?: boolean
+  auth?: boolean
+  /**
+   * Use this token instead of a freshly generated one (e.g., a launcher that
+   * wants a stable URL across restarts, or tests that need a known credential).
+   */
+  authToken?: string
 }
 
 export interface WebUIServerInstance {
+  // The per-run API token ('' when auth is disabled). Append it as ?token=… to
+  // reach the API from a client that isn't the served page.
+  token: string
   port: number
   host: string
   /** The openable URL, token fragment included — opening it authenticates you. */

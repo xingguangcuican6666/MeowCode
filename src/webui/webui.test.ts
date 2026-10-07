@@ -27,7 +27,6 @@ vi.mock('node:os', async (importOriginal) => {
 import { createWebUIServer } from './server'
 import { SLOT_IDS } from './types'
 import type { WebUIPlugin, WebUIServerInstance } from './types'
-import type { WebUISecurity } from './security'
 import { SETTINGS, settingGroups } from '../lib/settings'
 import { registry } from '../commands'
 import { loadConfig } from '../config'
@@ -80,14 +79,22 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   let instance: WebUIServerInstance
   const testPort = 44556
 
-  // Every /api/* call needs the per-process token; only the document and
-  // /api/security are public. Header auth is what the tests use — the browser
-  // spends the token for a cookie instead, which is the same check server-side.
-  const token = () => (instance as WebUIServerInstance & { security: WebUISecurity }).security.token
-  const authed = (extra: Record<string, string> = {}) => ({
-    Authorization: `Bearer ${token()}`,
-    ...extra,
-  })
+  // The server requires this run's token on every /api route (see server.ts).
+  // The served page embeds it; a test client passes it explicitly.
+  const api = (path: string, init: RequestInit = {}): Promise<Response> =>
+    fetch(`http://127.0.0.1:${testPort}${path}`, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', 'X-MeowCode-Token': instance.token, ...(init.headers ?? {}) },
+    })
+
+  // Convenience wrappers for the common cases so the 90 call sites stay readable
+  const get = (path: string) => api(path)
+  const post = (path: string, body?: unknown, extra: Record<string, string> = {}) =>
+    api(path, {
+      method: 'POST',
+      headers: extra,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
 
   /**
    * A config write, undone exactly.
@@ -118,14 +125,6 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     }
     if ('settings' in before) expect(after.settings).toEqual((before as any).settings)
   }
-
-  const get = (path: string) => fetch(`http://127.0.0.1:${testPort}${path}`, { headers: authed() })
-  const post = (path: string, body?: unknown, extra: Record<string, string> = {}) =>
-    fetch(`http://127.0.0.1:${testPort}${path}`, {
-      method: 'POST',
-      headers: authed({ 'Content-Type': 'application/json', ...extra }),
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
 
   const customPlugin: WebUIPlugin = {
     id: 'test-custom-plugin',
@@ -260,7 +259,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('provides session state and session reset API', async () => {
-    const stateRes = await get('/api/session/state')
+    const stateRes = await api(`/api/session/state`)
     expect(stateRes.status).toBe(200)
     const state: any = await stateRes.json()
     expect(state).toHaveProperty('sessionId')
@@ -269,7 +268,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(state.isRunning).toBe(false)
 
     // Reset session
-    const resetRes = await post('/api/session/reset')
+    const resetRes = await api(`/api/session/reset`, { method: 'POST' })
     expect(resetRes.status).toBe(200)
     const resetState: any = await resetRes.json()
     expect(resetState.sessionId).toBeDefined()
@@ -277,7 +276,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('lists tools and exposes tool schemas', async () => {
-    const res = await get('/api/tools')
+    const res = await api(`/api/tools`)
     expect(res.status).toBe(200)
     const data: any = await res.json()
     expect(Array.isArray(data.tools)).toBe(true)
@@ -924,7 +923,9 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
 
   /** A live SSE subscription, readable on demand so a test can poll its frames. */
   const openSse = async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/api/events`, { headers: authed() })
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/events`, {
+      headers: { Authorization: `Bearer ${instance.token}` },
+    })
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/event-stream')
     if (!res.body) throw new Error('the SSE response carried no body')
@@ -1328,24 +1329,21 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   // port" is not an acceptable default. These assert the two layers that close
   // it: the token on /api/*, and the origin allowlist on everything.
 
-  it('serves the document and the security probe without a credential', async () => {
-    // Public by design: the page has to render before it can ask for a token.
+  it('serves the document without a credential, and refuses /api without one', async () => {
+    // Public by design: the page has to render before it can carry the token.
+    // Everything under /api/ is not. (src/webui/auth.test.ts covers the token's
+    // accepted forms and the anti-DNS-rebinding Host check; these assert the
+    // origin layer, which is the half that stays on even when auth is off.)
     const doc = await fetch(`http://127.0.0.1:${testPort}/`)
     expect(doc.status).toBe(200)
 
-    const probe = await fetch(`http://127.0.0.1:${testPort}/api/security`)
-    expect(probe.status).toBe(200)
-    const data: any = await probe.json()
-    expect(data.authRequired).toBe(true)
-    expect(data.bypass).toBe(false)
-    // It must not leak the token it is protecting.
-    expect(JSON.stringify(data)).not.toContain(token())
+    const guarded = await fetch(`http://127.0.0.1:${testPort}/api/session/state`)
+    expect(guarded.status).toBe(401)
   })
 
   it('refuses /api/* with no token and with the wrong one', async () => {
     const missing = await fetch(`http://127.0.0.1:${testPort}/api/session/state`)
     expect(missing.status).toBe(401)
-    expect(missing.headers.get('www-authenticate')).toContain('Bearer')
 
     const wrong = await fetch(`http://127.0.0.1:${testPort}/api/session/state`, {
       headers: { Authorization: 'Bearer not-the-real-token' },
@@ -1353,33 +1351,15 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(wrong.status).toBe(401)
   })
 
-  it('accepts the token as a Bearer header or as the auth cookie', async () => {
+  it('accepts the token as a Bearer header', async () => {
     const viaHeader = await get('/api/session/state')
     expect(viaHeader.status).toBe(200)
-
-    // What the browser does: spend the fragment token for an HttpOnly cookie.
-    const exchange = await post('/api/auth', { token: token() })
-    expect(exchange.status).toBe(200)
-    const setCookie = exchange.headers.get('set-cookie') || ''
-    expect(setCookie).toContain('meowcode_token=')
-    expect(setCookie).toContain('HttpOnly')
-
-    const cookie = setCookie.split(';')[0]
-    const viaCookie = await fetch(`http://127.0.0.1:${testPort}/api/session/state`, {
-      headers: { Cookie: cookie },
-    })
-    expect(viaCookie.status).toBe(200)
-  })
-
-  it('rejects a bad token at the exchange', async () => {
-    const res = await post('/api/auth', { token: 'nope' })
-    expect(res.status).toBe(401)
   })
 
   it('never echoes a foreign origin, and answers its preflight with 403', async () => {
     const foreign = 'https://evil.example.com'
     const res = await fetch(`http://127.0.0.1:${testPort}/api/session/state`, {
-      headers: { Authorization: `Bearer ${token()}`, Origin: foreign },
+      headers: { Authorization: `Bearer ${instance.token}`, Origin: foreign },
     })
     expect(res.status).toBe(403)
     // No ACAO header at all is what makes the browser refuse the response.
@@ -1395,7 +1375,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   it('echoes the same origin back', async () => {
     const same = `http://127.0.0.1:${testPort}`
     const res = await fetch(`http://127.0.0.1:${testPort}/api/session/state`, {
-      headers: { Authorization: `Bearer ${token()}`, Origin: same },
+      headers: { Authorization: `Bearer ${instance.token}`, Origin: same },
     })
     expect(res.status).toBe(200)
     expect(res.headers.get('access-control-allow-origin')).toBe(same)
@@ -1434,27 +1414,24 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     }
   })
 
-  it('runs --no-auth servers open, and says so', async () => {
+  it('runs --no-auth servers open, but still refuses a foreign origin', async () => {
+    // `auth: false` is the explicit "I mean to expose this" switch. What it must
+    // NOT do is turn off the origin layer: a page on evil.example still cannot
+    // read the API, so exposing the port does not also expose it to the web.
     const openPort = testPort + 1
-    const open = createWebUIServer({ port: openPort, host: '127.0.0.1', openBrowser: false, noAuth: true })
+    const open = createWebUIServer({ port: openPort, host: '127.0.0.1', openBrowser: false, auth: false })
     await new Promise<void>((resolve) => {
       ;(open as any).listen(openPort, () => resolve())
     })
     try {
-      // No credential, and it works — that is what the flag means.
+      // No credential needed — that is what the flag means.
       const res = await fetch(`http://127.0.0.1:${openPort}/api/session/state`)
       expect(res.status).toBe(200)
 
-      // Bypass is not "no origin checks either": a foreign page still cannot
-      // read the API, so exposing the port does not also expose it to the web.
       const foreign = await fetch(`http://127.0.0.1:${openPort}/api/session/state`, {
         headers: { Origin: 'https://evil.example.com' },
       })
       expect(foreign.status).toBe(403)
-
-      const probe: any = await (await fetch(`http://127.0.0.1:${openPort}/api/security`)).json()
-      expect(probe.bypass).toBe(true)
-      expect(probe.authRequired).toBe(false)
     } finally {
       await open.close()
     }

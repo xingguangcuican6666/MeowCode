@@ -14,6 +14,9 @@ interface Props {
   // The `questionTimeout` setting: seconds before the prompt auto-continues with
   // the default (allow-once) option. 0 = never (wait indefinitely for an answer).
   autoContinueSecs: number
+  // What "always allow" would actually cover (see lib/allowScope) — e.g. "npm test …"
+  // rather than all of `bash`. Defaults to the tool name.
+  alwaysLabel?: string
   onDecide: (choice: PermissionChoice) => void
 }
 
@@ -35,12 +38,12 @@ function detailFor(tool: string, input: Record<string, unknown>): string {
 // it owns all keys while open (App's useInput early-returns on it). Enter confirms
 // the highlighted option; y/a/n are shortcuts; esc denies. When questionTimeout is
 // set, an idle prompt auto-continues with "Allow once" after the countdown.
-export function PermissionDialog({ tool, summary, input, mode, width, autoContinueSecs, onDecide }: Props): React.ReactElement {
+export function PermissionDialog({ tool, summary, input, mode, width, autoContinueSecs, alwaysLabel, onDecide }: Props): React.ReactElement {
   const colors = useTheme()
   const t = useT()
   const options: Array<{ choice: PermissionChoice; label: string }> = [
     { choice: 'once', label: t('perm.optOnce') },
-    { choice: 'always', label: t('perm.optAlways', { tool }) },
+    { choice: 'always', label: t('perm.optAlways', { tool: alwaysLabel || tool }) },
     { choice: 'deny', label: t('perm.optDeny') },
   ]
   const [index, setIndex] = useState(0)

@@ -1,12 +1,24 @@
 // Web access tools — fetch a URL's readable text (`web_fetch`) and run a web
 // search (`web_search`). Dependency-free: both use the global `fetch`, and HTML
-// is reduced to text with small regex passes rather than a parser dependency, so
+// is reduced to text by a single-pass scanner rather than a parser dependency, so
 // the tools work anywhere the CLI runs. Network egress is agent-initiated
 // research (docs, error messages, library APIs); like the search tools they
 // auto-run (not in tools/permission MUTATING). Not for authenticated/private
 // pages — there's no cookie/credential handling here by design.
+//
+// The URL comes from the model, so every request goes through lib/net's guard:
+// the host is resolved and checked against loopback/private/link-local/metadata
+// ranges, redirects are re-validated hop by hop, and the body is read through a
+// byte cap. See lib/net.ts.
 import type { ToolDef, ToolResult } from './types'
 import { clip } from './util'
+import { guardedFetch, BlockedUrlError } from '../lib/net'
+
+// Hard caps on what one fetch may pull into memory before any clipping.
+const MAX_BODY_BYTES = 5_000_000
+// Above this, HTML goes through the scanner in truncated form: a document this
+// large is not a readable page, and the text we keep is far smaller anyway.
+const MAX_HTML_CHARS = 2_000_000
 
 // A browser-ish UA so servers that gate bare clients still answer. No cookies,
 // no auth — this is public-page fetching only.
@@ -47,23 +59,77 @@ function stripTags(s: string): string {
   return decodeEntities(s.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
 }
 
-// Reduce a full HTML document to readable text: drop scripts/styles/chrome,
-// turn block-level closers into newlines, strip the rest, decode entities, and
-// collapse runs of whitespace. Not a faithful renderer — just enough that the
-// model can read an article or doc page.
+// Tags whose ENTIRE subtree is dropped (code, styling and page chrome).
+const DROP_SUBTREE = new Set(['script', 'style', 'noscript', 'template', 'svg', 'head', 'nav', 'footer', 'header', 'aside', 'form'])
+// Closing these ends a line of text.
+const BLOCK_END = new Set(['p', 'div', 'section', 'article', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'blockquote', 'pre'])
+
+// Reduce a full HTML document to readable text. Single forward pass — no
+// `[\s\S]*?` tag-pair regexes, which backtrack badly on unclosed tags in a big
+// document. Not a faithful renderer: just enough that the model can read an
+// article or a doc page.
 function htmlToText(html: string): string {
-  let s = html
-  s = s.replace(/<!--[\s\S]*?-->/g, ' ')
-  s = s.replace(/<(script|style|noscript|template|svg)\b[\s\S]*?<\/\1>/gi, ' ')
-  s = s.replace(/<(head|nav|footer|header|aside|form)\b[\s\S]*?<\/\1>/gi, ' ')
-  s = s.replace(/<li\b[^>]*>/gi, '\n- ')
-  s = s.replace(/<br\s*\/?>/gi, '\n')
-  s = s.replace(/<\/(p|div|section|article|tr|h[1-6]|ul|ol|li|table|blockquote|pre)>/gi, '\n')
-  s = s.replace(/<[^>]+>/g, ' ')
-  s = decodeEntities(s)
+  const src = html.length > MAX_HTML_CHARS ? html.slice(0, MAX_HTML_CHARS) : html
+  const n = src.length
+  const out: string[] = []
+  let i = 0
+  let dropping = ''        // tag name whose subtree we're inside ('' = none)
+  let depth = 0            // nesting of that same tag
+  while (i < n) {
+    const lt = src.indexOf('<', i)
+    if (lt < 0) { if (!dropping) out.push(src.slice(i)); break }
+    if (!dropping) out.push(src.slice(i, lt))
+    if (src.startsWith('<!--', lt)) {                     // comment
+      const e = src.indexOf('-->', lt + 4)
+      i = e < 0 ? n : e + 3
+      continue
+    }
+    const gt = src.indexOf('>', lt + 1)
+    if (gt < 0) break                                     // unterminated tag: stop
+    const raw = src.slice(lt + 1, gt)
+    const closing = raw.charCodeAt(0) === 47              // '/'
+    const name = /^[a-zA-Z][a-zA-Z0-9:-]*/.exec(closing ? raw.slice(1) : raw)?.[0].toLowerCase() ?? ''
+    const selfClosing = raw.endsWith('/')
+    if (dropping) {
+      if (name === dropping) {
+        if (closing) { depth--; if (depth <= 0) dropping = '' }
+        else if (!selfClosing) depth++
+      }
+      i = gt + 1
+      continue
+    }
+    if (!closing && !selfClosing && DROP_SUBTREE.has(name)) { dropping = name; depth = 1; i = gt + 1; continue }
+    if (name === 'br') out.push('\n')
+    else if (!closing && name === 'li') out.push('\n- ')
+    else if (closing && BLOCK_END.has(name)) out.push('\n')
+    else out.push(' ')
+    i = gt + 1
+  }
+  let s = decodeEntities(out.join(''))
   s = s.replace(/[ \t\f\v\r]+/g, ' ')
-  s = s.split('\n').map((l) => l.trim()).filter((l, i, a) => l !== '' || (a[i - 1] ?? '') !== '').join('\n')
+  s = s.split('\n').map((l) => l.trim()).filter((l, idx, a) => l !== '' || (a[idx - 1] ?? '') !== '').join('\n')
   return s.replace(/\n{3,}/g, '\n\n').trim()
+}
+
+// Decode a response body with the charset the server (or the document) declares.
+// Node's TextDecoder covers the common legacy labels (gbk, shift_jis, latin1…);
+// an unknown label falls back to UTF-8 rather than throwing.
+function decodeBody(bytes: Uint8Array, contentType: string): string {
+  let label = /charset=\s*"?([\w:.-]+)/i.exec(contentType)?.[1]
+  if (!label) {
+    // Sniff a <meta charset> / <meta http-equiv> in the first 4 KB, ASCII-wise.
+    const head = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, 4096))
+    label = /<meta[^>]+charset=\s*"?([\w:.-]+)/i.exec(head)?.[1]
+      ?? /<meta[^>]+content=["'][^"']*charset=\s*([\w:.-]+)/i.exec(head)?.[1]
+  }
+  const tryLabel = (l: string): string | null => {
+    try { return new TextDecoder(l, { fatal: false }).decode(bytes) } catch { return null }
+  }
+  if (label && !/^utf-?8$/i.test(label)) {
+    const decoded = tryLabel(label)
+    if (decoded !== null) return decoded
+  }
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
 }
 
 function normalizeUrl(raw: string): string | null {
@@ -128,16 +194,23 @@ export const webFetch: ToolDef = {
     const maxChars = Math.max(500, Number(input.max_chars) || 20000)
     const { signal, cancel } = timedSignal(ctx.signal, Number(input.timeout_ms) || 20000)
     try {
-      const res = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8', 'accept-language': 'en,zh;q=0.8' }, redirect: 'follow', signal })
-      if (!res.ok) return { content: `web_fetch: HTTP ${res.status} for ${url}`, isError: true }
+      const res = await guardedFetch(url, {
+        headers: { 'user-agent': UA, accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8', 'accept-language': 'en,zh;q=0.8' },
+        signal, maxBytes: MAX_BODY_BYTES,
+      })
+      if (!res.ok) return { content: `web_fetch: HTTP ${res.status} for ${res.url}`, isError: true }
       const ctype = (res.headers.get('content-type') || '').toLowerCase()
-      const raw = await res.text()
+      const raw = decodeBody(res.bytes, ctype)
       const isHtml = ctype.includes('html') || /^\s*<(!doctype|html)/i.test(raw)
       const text = isHtml ? htmlToText(raw) : raw.trim()
       const clipped = text.length > maxChars ? text.slice(0, maxChars) + `\n\n… [truncated ${text.length - maxChars} chars; raise max_chars to read more]` : text
-      const header = `# ${url}\n(${ctype || 'unknown type'}, ${raw.length} bytes fetched)\n\n`
+      const notes = [`${ctype || 'unknown type'}`, `${res.bytes.byteLength} bytes fetched`]
+      if (res.truncated) notes.push(`body capped at ${MAX_BODY_BYTES} bytes`)
+      if (res.url !== url) notes.push(`redirected to ${res.url}`)
+      const header = `# ${url}\n(${notes.join(', ')})\n\n`
       return { content: clip(header + (clipped || '(no readable text extracted)'), maxChars + 500), display: `web_fetch · ${url} (${text.length} chars)` }
     } catch (e) {
+      if (e instanceof BlockedUrlError) return { content: `web_fetch: ${e.message}. Only public http(s) addresses are allowed; set MEOWCODE_ALLOW_PRIVATE_FETCH=1 to reach a local address on purpose.`, isError: true }
       const msg = ctx.signal?.aborted ? '(aborted)' : (e as Error).message === 'timeout' || /abort/i.test((e as Error).message) ? 'request timed out' : (e as Error).message
       return { content: `web_fetch: failed to fetch ${url}: ${msg}`, isError: true }
     } finally { cancel() }
@@ -201,15 +274,14 @@ export const webSearch: ToolDef = {
     const blocked = parseDomains(input.blocked_domains)
     const { signal, cancel } = timedSignal(ctx.signal, Number(input.timeout_ms) || 20000)
     try {
-      const res = await fetch('https://html.duckduckgo.com/html/', {
+      const res = await guardedFetch('https://html.duckduckgo.com/html/', {
         method: 'POST',
         headers: { 'user-agent': UA, 'content-type': 'application/x-www-form-urlencoded', accept: 'text/html', 'accept-language': 'en,zh;q=0.8' },
         body: `q=${encodeURIComponent(query)}`,
-        redirect: 'follow',
-        signal,
+        signal, maxBytes: MAX_BODY_BYTES,
       })
       if (!res.ok) return { content: `web_search: search backend returned HTTP ${res.status}`, isError: true }
-      const html = await res.text()
+      const html = decodeBody(res.bytes, res.headers.get('content-type') || '')
       let hits = parseDdgHtml(html, allowed.length || blocked.length ? 50 : limit)
       if (allowed.length || blocked.length) {
         hits = hits.filter((h) => !domainRejection(h.url, allowed, blocked)).slice(0, limit)

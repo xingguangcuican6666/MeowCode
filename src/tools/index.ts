@@ -33,16 +33,74 @@ function withDynamicEnums(name: string, schema: Record<string, unknown>, cwd: st
 // workflows. `cwd` (when given) drives the dynamic `subagent_type` enum.
 // `planMode` (top-level + `plan` permission mode) surfaces the `exit_plan_mode`
 // approval tool, which is otherwise withheld — it only makes sense while planning.
-export function toolSchemas(includeOrchestration = true, allowWorkflow = true, cwd?: string, planMode = false): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
-  const builtin = TOOLS.filter((t) => (includeOrchestration || !t.orchestration) && (allowWorkflow || t.name !== 'workflow') && (planMode || t.name !== 'exit_plan_mode')).map((t) => ({
+/**
+ * The tool schemas sent to the model. `allowed` restricts the set to named tools —
+ * a custom sub-agent's `tools:` front-matter (see lib/agents). Names are matched
+ * loosely so the front-matter may use Claude Code's spellings (Read, Edit, Bash)
+ * alongside ours, and `mcp__server__*` globs. An empty/absent list means "all".
+ */
+export function toolSchemas(
+  includeOrchestration = true,
+  allowWorkflow = true,
+  cwd?: string,
+  planMode = false,
+  allowed?: string[],
+): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
+  const permit = toolFilter(allowed)
+  const builtin = TOOLS.filter((t) => (includeOrchestration || !t.orchestration) && (allowWorkflow || t.name !== 'workflow') && (planMode || t.name !== 'exit_plan_mode') && permit(t.name)).map((t) => ({
     name: t.name,
     description: t.description,
     input_schema: cwd ? withDynamicEnums(t.name, t.input_schema, cwd) : t.input_schema,
   }))
   // Append discovered MCP tools (mcp__<server>__<tool>). Empty until servers
   // finish their handshake, so they surface on the next turn after startup.
-  const mcp = mcpToolDefs().map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }))
+  const mcp = mcpToolDefs().filter((t) => permit(t.name)).map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }))
   return mcp.length ? [...builtin, ...mcp] : builtin
+}
+
+// Claude Code's tool spellings → ours, so a `tools:` list written for either tool
+// resolves. Keyed by the name lowercased with underscores stripped.
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  bash: 'bash', shell: 'bash',
+  edit: 'edit_file', editfile: 'edit_file', multiedit: 'edit_file',
+  write: 'write_file', writefile: 'write_file',
+  read: 'read_file', readfile: 'read_file',
+  notebookedit: 'notebook_edit',
+  webfetch: 'web_fetch', fetch: 'web_fetch',
+  websearch: 'web_search',
+  grep: 'grep', glob: 'glob', listdir: 'list_dir', ls: 'list_dir',
+  todowrite: 'todo_write', task: 'task', monitor: 'monitor',
+}
+
+/** Resolve one front-matter tool token to our tool id (or undefined if unknown). */
+export function resolveToolName(token: string): string | undefined {
+  const raw = token.trim()
+  if (!raw) return undefined
+  if (TOOLS.some((t) => t.name === raw) || raw.startsWith('mcp__')) return raw
+  const key = raw.toLowerCase().replace(/_/g, '')
+  return TOOL_NAME_ALIASES[key]
+}
+
+/**
+ * A predicate over tool names for an `allowed` list. Unknown tokens are kept as
+ * literals/globs rather than dropped, so a typo narrows the set instead of
+ * silently widening it.
+ */
+export function toolFilter(allowed?: string[]): (name: string) => boolean {
+  if (!allowed || allowed.length === 0) return () => true
+  const exact = new Set<string>()
+  const globs: RegExp[] = []
+  for (const token of allowed) {
+    const t = token.trim()
+    if (!t) continue
+    if (t === '*') return () => true
+    if (t.includes('*')) {
+      globs.push(new RegExp(`^${t.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`))
+      continue
+    }
+    exact.add(resolveToolName(t) ?? t)
+  }
+  return (name: string) => exact.has(name) || globs.some((re) => re.test(name))
 }
 
 export function findTool(name: string): ToolDef | undefined {

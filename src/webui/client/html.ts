@@ -1,9 +1,9 @@
-export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: string }> = []): string {
+export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: string }> = [], apiToken = ''): string {
   // Inline script bodies are terminated by the *parser*, not by JavaScript: a
   // literal `</script` anywhere in the source — even inside a string or a
   // comment — ends the element right there. That turns one careless plugin file
-  // into markup the browser executes in the origin that holds the auth cookie,
-  // and leaves the rest of the plugin as visibly broken HTML. `<\\/script` is
+  // into markup the browser executes in the origin that holds the API credential,
+  // and leaves the rest of the plugin as visibly broken HTML. `<\/script` is
   // equivalent to `</script` to a JS parser, so a plugin that means it still
   // means it after this rewrite. Nothing else needs neutralising: `\x3C/script`
   // and friends never matched the tag close to begin with.
@@ -11,6 +11,9 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   const pluginTags = pluginScripts
     .map((p) => `\n<!-- Plugin: ${p.id} -->\n<script>\n${inlineSafe(p.script)}\n</script>`)
     .join('\n')
+  // The page carries this run's API token (see server.ts): every /api call the SDK
+  // makes sends it back. JSON-encoded so it can never break out of the script.
+  const tokenTag = `<script>window.__MEOWCODE_API_TOKEN__ = ${JSON.stringify(apiToken)};</script>`
 
   return `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
@@ -30,6 +33,7 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
   <link rel="stylesheet" href="/style.css" />
   <script type="module" src="/material-web.js"></script>
+  ${tokenTag}
 </head>
 <body>
   <div id="app">

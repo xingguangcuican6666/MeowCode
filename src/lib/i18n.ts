@@ -519,6 +519,20 @@ export const messages = {
   'cmd.initRefreshing': { zh: '已存在项目指令（{files}）——正在据此刷新 MEOWCODE.md……', en: 'Project instructions already exist ({files}) — refreshing MEOWCODE.md accordingly…' },
   'cmd.initNonInteractive': { zh: '仅在交互式会话中可用——请运行 `meowcode` 后再使用 /init。', en: 'Only available in an interactive session — run `meowcode`, then use /init.' },
   'hooks.promptBlocked': { zh: 'UserPromptSubmit 钩子拦截了本次输入：{reason}', en: 'A UserPromptSubmit hook blocked this prompt: {reason}' },
+  'cmd.trustDesc': { zh: '查看/授予/撤销对本项目 .meowcode/settings.json 中 hooks 与 MCP 服务器的信任', en: "Review, grant or revoke trust for this project's .meowcode/settings.json hooks and MCP servers" },
+  'cmd.trustNoConfig': { zh: '本项目没有自己的 hooks 或 MCP 服务器配置（{path} 不存在或为空），无需信任。', en: 'This project defines no hooks or MCP servers ({path} is absent or empty) — nothing to trust.' },
+  'cmd.trustHeader': { zh: '本项目（{path}）声明了以下会被执行的内容：', en: 'This project ({path}) declares the following executable entries:' },
+  'cmd.trustHooksLine': { zh: '  • {count} 个 hook 命令', en: '  • {count} hook command(s)' },
+  'cmd.trustMcpLine': { zh: '  • MCP 服务器：{names}', en: '  • MCP servers: {names}' },
+  'cmd.trustStatusTrusted': { zh: '状态：已信任 —— 这些内容会随会话启动而运行。用 /trust remove 撤销。', en: 'Status: TRUSTED — these run when the session starts. Use /trust remove to revoke.' },
+  'cmd.trustStatusUntrusted': { zh: '状态：未信任 —— 以上内容不会运行。请先阅读该文件，确认无误后用 /trust add 授予信任。', en: 'Status: NOT trusted — none of the above runs. Read the file first, then use /trust add to grant trust.' },
+  'cmd.trustGranted': { zh: '已信任本项目的 hooks/MCP 配置。下次启动会话时生效（文件被修改后需重新信任）。', en: "Trusted this project's hooks/MCP config. Takes effect on the next session start (an edit to the file re-arms the gate)." },
+  'cmd.trustRevoked': { zh: '已撤销对本项目的信任；其 hooks/MCP 服务器不再运行。', en: "Revoked trust for this project; its hooks/MCP servers will no longer run." },
+  'cmd.trustNotTrusted': { zh: '本项目当前未被信任，无需撤销。', en: 'This project is not trusted — nothing to revoke.' },
+  'cmd.trustWriteFailed': { zh: '无法写入信任列表（~/.meowcode/trust.json）。', en: 'Could not write the trust list (~/.meowcode/trust.json).' },
+  'cmd.trustListHeader': { zh: '已信任的项目目录：', en: 'Trusted project directories:' },
+  'cmd.trustListEmpty': { zh: '尚未信任任何项目目录。', en: 'No project directories are trusted yet.' },
+  'trust.pending': { zh: '⚠ 本项目的 .meowcode/settings.json 声明了 {count} 项会被执行的内容（hooks/MCP 服务器），当前未信任、不会运行。用 /trust 查看。', en: '⚠ This project\'s .meowcode/settings.json declares {count} executable entr(ies) (hooks/MCP servers). They are untrusted and will NOT run — see /trust.' },
   'cmd.hooksDesc': { zh: '查看已配置的生命周期钩子（PreToolUse/PostToolUse 等）', en: 'Show configured lifecycle hooks (PreToolUse/PostToolUse, etc.)' },
   'cmd.hooksNone': { zh: '未配置任何钩子。可在 ~/.meowcode/settings.json 或项目 .meowcode/settings.json 的 "hooks" 键下添加（事件：PreToolUse、PostToolUse、UserPromptSubmit、SessionStart、Stop、Notification）。', en: 'No hooks configured. Add them under the "hooks" key of ~/.meowcode/settings.json or a project .meowcode/settings.json (events: PreToolUse, PostToolUse, UserPromptSubmit, SessionStart, Stop, Notification).' },
   'cmd.hooksHeader': { zh: '已配置的钩子：', en: 'Configured hooks:' },
@@ -761,6 +775,24 @@ export interface MessageEntry { zh: string; en: string }
 export function translate(lang: Lang, key: MessageKey, params?: Params): string {
   const entry = messages[key] as { zh: string; en: string }
   return interpolate(entry ? (entry[lang] ?? entry.en) : key, params)
+}
+
+/**
+ * Both language forms of one message, for callers that must not follow the
+ * active language — chiefly the search boxes, which match a row's zh AND en text
+ * so `lang` finds 「语言」 and 「语言」 finds "Language" (see lib/search.ts).
+ *
+ * Deliberately un-interpolated by default: a search haystack gains nothing from
+ * a substituted `{levels}` list (and loses the token `levels` itself), while the
+ * raw template is one lookup with no params to thread through. Pass `params` when
+ * the interpolated form is what you want to match against.
+ */
+export function bothLangs(key: MessageKey, params?: Params): { zh: string; en: string } {
+  const entry = messages[key] as { zh: string; en: string } | undefined
+  if (!entry) return { zh: key, en: key }
+  return params
+    ? { zh: interpolate(entry.zh, params), en: interpolate(entry.en, params) }
+    : { zh: entry.zh, en: entry.en }
 }
 
 // Module-level mirror for code outside the React tree (commands, lib helpers).

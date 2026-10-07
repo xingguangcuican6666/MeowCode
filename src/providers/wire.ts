@@ -69,7 +69,7 @@ export function toApiMessages(messages: Message[]): ApiMsg[] {
 export async function* parseStream(res: Response, signal?: AbortSignal): AsyncGenerator<
   | { type: 'text'; text: string }
   | { type: 'thinking'; text: string }
-  | { type: 'done'; blocks: ApiBlock[]; stopReason: string; usage: StreamUsage },
+  | { type: 'done'; blocks: ApiBlock[]; stopReason: string; usage: StreamUsage; badToolInputs: string[] },
   void,
   unknown
 > {
@@ -80,6 +80,10 @@ export async function* parseStream(res: Response, signal?: AbortSignal): AsyncGe
   const jsonBuf: Record<number, string> = {}
   let stopReason = 'end_turn'
   const usage = emptyStreamUsage()
+  // tool_use ids whose argument JSON never parsed (the usual cause: the response
+  // hit max_tokens mid-object). The caller must NOT run these — an empty `input`
+  // silently drops arguments, so a half-streamed call would execute with defaults.
+  const badToolInputs: string[] = []
 
   while (true) {
     let done = false
@@ -94,6 +98,13 @@ export async function* parseStream(res: Response, signal?: AbortSignal): AsyncGe
         if (!m || m[1] === '[DONE]') continue
         let json: any
         try { json = JSON.parse(m[1]) } catch { continue }
+        if (json.type === 'error') {
+          // The API reports a mid-stream failure (overloaded_error, api_error…) as
+          // an SSE event with a 200 status. Ignoring it left the turn hanging on a
+          // stream that never produces content; throwing lets the caller retry.
+          const err = json.error ?? {}
+          throw new Error(`${err.type || 'api error'}: ${err.message || 'stream reported an error'}`)
+        }
         if (json.type === 'message_start') {
           const u = json.message?.usage
           if (u) {
@@ -122,7 +133,15 @@ export async function* parseStream(res: Response, signal?: AbortSignal): AsyncGe
           }
         } else if (json.type === 'content_block_stop') {
           const b = blocks[json.index]
-          if (b?.type === 'tool_use') { try { b.input = JSON.parse(jsonBuf[json.index] || '{}') } catch { b.input = {} } }
+          if (b?.type === 'tool_use') {
+            const buf = jsonBuf[json.index] ?? ''
+            try {
+              b.input = JSON.parse(buf || '{}')
+            } catch {
+              b.input = {}
+              badToolInputs.push(b.id)
+            }
+          }
         } else if (json.type === 'message_delta') {
           if (json.delta?.stop_reason) stopReason = json.delta.stop_reason
           if (json.usage?.output_tokens != null) usage.output = json.usage.output_tokens
@@ -131,5 +150,5 @@ export async function* parseStream(res: Response, signal?: AbortSignal): AsyncGe
     }
     if (done) break
   }
-  yield { type: 'done', blocks: blocks.filter(Boolean), stopReason, usage }
+  yield { type: 'done', blocks: blocks.filter(Boolean), stopReason, usage, badToolInputs }
 }

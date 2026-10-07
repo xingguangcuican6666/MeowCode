@@ -1,4 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
+import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { loadConfig } from '../config'
 import {
@@ -19,7 +20,6 @@ import { themeList } from '../theme'
 import { COMMAND_CONTEXT_VALUE_MEMBERS } from '../types'
 import type { AppConfig, CommandContext, Message, MessageMeta, PanelTab, Role } from '../types'
 import { WEBUI_MESSAGES } from './client/messages'
-import { createWebUISecurity, type WebUISecurity } from './security'
 import { AgentBridge } from './agent-bridge'
 import type { WebUIInteraction, WebUIInteractionResponse } from './agent-bridge'
 import { PluginManager } from './plugin-manager'
@@ -132,7 +132,77 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
     return { patch }
   }
 
-  const security = createWebUISecurity({ bypass: options.noAuth === true })
+  // ---- access control ------------------------------------------------------
+  //
+  // This server reaches ANY tool through `/api/tools/call` (bash included), so
+  // reaching the API must require this run's token AND come from our own page.
+  // Binding to loopback is not by itself a boundary: any page the user has open
+  // can POST to http://127.0.0.1:4040, and a hostname that resolves to 127.0.0.1
+  // defeats a socket-level check. So:
+  //
+  //   - every /api route requires a per-run secret token (the page is served with
+  //     it embedded, so a user who opens the printed URL never sees a difference);
+  //   - cross-origin requests are refused rather than invited in with `*`;
+  //   - the Host header must name the address we bound to (anti DNS-rebinding).
+  //
+  // This is the token model from origin/main's security pass. An earlier branch of
+  // this work shipped a two-step variant instead (token in the URL *fragment*,
+  // exchanged for an HttpOnly cookie at POST /api/auth, because EventSource cannot
+  // send headers). That variant was dropped in the merge: this one is a single
+  // step, and src/webui/auth.test.ts asserts its shape. EventSource still
+  // authenticates because /api/events accepts the token as `?token=` — see
+  // presentedToken below.
+  const authToken = options.authToken ?? crypto.randomBytes(24).toString('base64url')
+  const requireAuth = options.auth !== false
+
+  const timingSafeEqual = (a: string, b: string): boolean => {
+    const ba = Buffer.from(a)
+    const bb = Buffer.from(b)
+    return ba.length === bb.length && crypto.timingSafeEqual(ba, bb)
+  }
+
+  // Hostname-only comparison: the request already arrived on OUR socket, so the
+  // port adds nothing, while pinning it would break the port-walk fallback below.
+  // What matters is the NAME the client used — that is what DNS rebinding forges.
+  const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+  const boundLoopback = LOOPBACK.has(host.toLowerCase())
+
+  const nameAllowed = (hostname: string): boolean => {
+    const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    if (boundLoopback) return LOOPBACK.has(h) || LOOPBACK.has(`[${h}]`)
+    // A deliberate non-loopback bind answers to that name (and to loopback, since
+    // the user can still reach it locally).
+    return h === host.toLowerCase() || LOOPBACK.has(h)
+  }
+
+  /** Did the client address us by a name we answer to? (anti DNS-rebinding) */
+  const hostAllowed = (hdr: string | undefined): boolean => {
+    if (!hdr) return false
+    // Strip the port; keep IPv6 brackets intact.
+    const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(hdr.trim())
+    return m ? nameAllowed(m[1]) : false
+  }
+
+  /** Is this request's Origin our own page (or absent, i.e. not a browser)? */
+  const originAllowed = (req: IncomingMessage): boolean => {
+    const origin = req.headers.origin
+    if (!origin || origin === 'null') return !origin   // curl/native clients: fine; opaque origin: no
+    try { return nameAllowed(new URL(origin).hostname) } catch { return false }
+  }
+
+  /**
+   * The token a request presents, from the header, a bearer header, or the query.
+   *
+   * The query string is not decoration: `EventSource` cannot set request headers,
+   * so /api/events is the one route a browser can only authenticate this way.
+   */
+  const presentedToken = (req: IncomingMessage, url: URL): string => {
+    const hdr = req.headers['x-meowcode-token']
+    if (typeof hdr === 'string' && hdr) return hdr
+    const auth = req.headers.authorization
+    if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim()
+    return url.searchParams.get('token') ?? ''
+  }
 
   const bridge = new AgentBridge(config, cwd)
   const pluginManager = new PluginManager(cwd)
@@ -646,31 +716,39 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
   }
 
   const server = http.createServer(async (req, res) => {
-    // Two independent gates, both from security.ts. CORS is answered first and
-    // unconditionally: a rejected browser must get its 403 from the preflight,
-    // not from a handler that then leaks a second answer.
-    const allowedOrigin = security.reflectOrigin(req)
-    if (allowedOrigin) {
-      res.setHeader('Access-Control-Allow-Origin', allowedOrigin)
-      // Echo only what the browser actually sent; Vary keeps a shared cache from
-      // serving one origin's CORS headers to another.
+    // Only our own page is a permitted origin — `*` here would let ANY website call
+    // /api/tools/call (preflight passed, response readable) on a server that runs
+    // tools with bypassPermissions.
+    const reqOrigin = req.headers.origin
+    const okOrigin = originAllowed(req)
+    if (reqOrigin && okOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', reqOrigin)
       res.setHeader('Vary', 'Origin')
-    } else if (req.headers.origin) {
-      sendJson(res, 403, { error: 'Origin not allowed' })
-      return
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-MeowCode-Token, Authorization')
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-    res.setHeader('Access-Control-Allow-Credentials', 'true')
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(204)
+      res.writeHead(okOrigin ? 204 : 403)
       res.end()
       return
     }
 
     const url = new URL(req.url || '/', `http://${host}:${port}`)
     const pathname = url.pathname
+
+    // Anti DNS-rebinding: the browser must have addressed us by the name we bound
+    // to. A page on evil.example whose DNS answers 127.0.0.1 arrives with
+    // Host: evil.example and is refused here.
+    if (!hostAllowed(req.headers.host)) {
+      sendJson(res, 403, { error: 'Host not allowed' })
+      return
+    }
+    if (!okOrigin) {
+      sendJson(res, 403, { error: 'Origin not allowed' })
+      return
+    }
+
     // Server-rendered text follows the configured language; `?lang=` overrides it
     // so the client's /api/i18n fetch and this request cannot disagree about which
     // language a /api/commands/run error is in. The language is read back from the
@@ -682,49 +760,23 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
       reqLangParam === 'zh' || reqLangParam === 'en'
         ? reqLangParam
         : resolveLang(String(getSetting(bridge.getConfig().settings, 'language') || 'auto'))
-    // The document itself is public so an unauthenticated tab gets a readable
-    // "ask for the token" page instead of a blank screen; everything under
-    // /api/ needs the token. /style.css and /app.js stay public for the same
-    // reason — they hold no secrets and the page needs them to say anything.
+
+    // Everything under /api needs the run's token. The page itself is served
+    // without one (it embeds the token for its own later calls).
     const isApi = pathname.startsWith('/api/')
+    if (requireAuth && isApi && !timingSafeEqual(presentedToken(req, url), authToken)) {
+      sendJson(res, 401, { error: 'Missing or invalid token. Open the URL printed by MeowCode (it carries ?token=…).' })
+      return
+    }
 
     try {
-      // API: trade the fragment token for a cookie. The fragment never reaches
-      // the server, so this POST is how the browser spends it.
-      if (req.method === 'POST' && pathname === '/api/auth') {
-        const body = await parseJsonBody(req)
-        const auth = security.authenticateToken(String(body?.token || ''))
-        if (!auth.ok) {
-          sendJson(res, 401, { error: auth.reason === 'missing' ? 'Token required' : 'Invalid token' })
-          return
-        }
-        security.remember(res)
-        sendJson(res, 200, { ok: true, ...security.status() })
-        return
-      }
-
-      // API: what the client needs to render its auth state. Public by design —
-      // it tells the page whether to ask for a token, and reveals nothing else.
-      if (req.method === 'GET' && pathname === '/api/security') {
-        sendJson(res, 200, security.status())
-        return
-      }
-
-      if (isApi) {
-        const auth = security.authenticate(req)
-        if (!auth.ok) {
-          res.setHeader('WWW-Authenticate', 'Bearer realm="MeowCode WebUI"')
-          sendJson(res, 401, { error: auth.reason === 'missing' ? 'Token required' : 'Invalid token' })
-          return
-        }
-      }
 
       // Static Assets
       if ((req.method === 'GET' || req.method === 'HEAD') && (pathname === '/' || pathname === '/index.html')) {
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
         res.writeHead(200)
         if (req.method === 'HEAD') return res.end()
-        const html = generateWebUIHtml(pluginManager.getFrontendScripts())
+        const html = generateWebUIHtml(pluginManager.getFrontendScripts(), requireAuth ? authToken : '')
         res.end(html)
         return
       }
@@ -1160,11 +1212,9 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
 
   let effectivePort = port
 
-  // `listen` and `security` are server-internal: `listen` lets tests and
-  // startWebUI bind the port themselves, and `security` lets the caller read the
-  // token without re-deriving it. Neither is part of the public contract.
+  // `listen` is server-internal: it lets tests and startWebUI bind the port
+  // themselves. Not part of the public contract.
   interface WebUIServerInternals extends WebUIServerInstance {
-    security: WebUISecurity
     listen: (p: number, onListening?: () => void) => http.Server
   }
 
@@ -1176,12 +1226,24 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
       return host
     },
     get url() {
-      // Includes the token fragment, so whatever the caller does with this URL
-      // (print it, log it, hand it to a teammate) works without extra steps.
+      // Carries the token as a query param, so whatever the caller does with this
+      // URL (print it, open it, hand it to a teammate) works without extra steps.
+      // A query param rather than a fragment: the page reads it at boot and sends
+      // it back on every /api call, which is also the only way EventSource can
+      // authenticate (see presentedToken).
       const base = `http://${host}:${effectivePort}`
-      return security.token ? `${base}/#token=${security.token}` : base
+      return requireAuth ? `${base}/?token=${authToken}` : base
     },
-    /** The same server without the credential fragment — safe to log. */
+    /**
+     * The credential this run's /api routes require — empty when `auth: false`,
+     * which is what tells a caller there is nothing to hand out. Returning the
+     * generated token anyway would print a credential for a server that ignores
+     * it, and would leak it to a test asserting that opting out really opts out.
+     */
+    get token() {
+      return requireAuth ? authToken : ''
+    },
+    /** The same server without the credential — safe to log. */
     get baseUrl() {
       return `http://${host}:${effectivePort}`
     },
@@ -1227,8 +1289,6 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
       server.listen(p, host, onListening)
       return server
     },
-    // Exposed so startWebUI can print the token without re-deriving it.
-    security,
   }
 
   return instance
@@ -1256,7 +1316,6 @@ export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServe
   const initialPort = options.port || 4040
   const host = options.host || '127.0.0.1'
   const instance = createWebUIServer(options)
-  const { security } = instance as WebUIServerInstance & { security: WebUISecurity }
 
   return new Promise((resolve, reject) => {
     let currentPort = initialPort
@@ -1277,16 +1336,16 @@ export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServe
 
     server.on('listening', () => {
       const base = `http://${host}:${currentPort}`
-      // The token rides in the fragment, which browsers never send to a server
-      // or a proxy log — so the credential does not land in access logs, and the
-      // app.js exchange is what turns it into the auth cookie.
-      const url = security.token ? `${base}/#token=${security.token}` : base
+      // The token is embedded in the served page (see the html() template), and
+      // passed in the query string here so a single link grants access. Both the
+      // header (X-MeowCode-Token / Authorization) and query param (?token=) work.
+      const url = instance.token ? `${base}/?token=${instance.token}` : base
       if (options.openBrowser !== false) {
         launchBrowser(url)
       }
-      if (security.token) {
+      if (instance.token) {
         process.stdout.write(
-          `🔑 WebUI token (this URL fragment is the only credential; treat it like a password): ${base}/#token=${security.token}\n`,
+          `🔑 WebUI token (this URL is the only credential; treat it like a password): ${base}/?token=${instance.token}\n`,
         )
       } else {
         process.stdout.write(

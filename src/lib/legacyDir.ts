@@ -120,6 +120,13 @@ export function inspectLegacyDir(): LegacyDirInfo | null {
   return { dir: LEGACY_CONFIG_DIR, present }
 }
 
+// Files whose contents are secret: the copy must land 0600 whatever the old file's
+// mode was. copyFileSync carries the SOURCE's permission bits, and an old
+// credentials.json written before the 0600 rule (or edited under a loose umask)
+// would otherwise arrive world-readable and stay that way until the next login
+// rewrites it.
+const SECRET_FILES = new Set(['credentials.json'])
+
 function copyFileNoOverwrite(from: string, to: string): boolean {
   if (exists(to)) return false // never clobber newer MeowCode state
   try {
@@ -128,6 +135,9 @@ function copyFileNoOverwrite(from: string, to: string): boolean {
     if (!fs.lstatSync(from).isFile()) return false
     fs.mkdirSync(path.dirname(to), { recursive: true })
     fs.copyFileSync(from, to)
+    if (SECRET_FILES.has(path.basename(to))) {
+      try { fs.chmodSync(to, 0o600) } catch { /* best-effort on platforms without chmod */ }
+    }
     return true
   } catch {
     // One unreadable file must not abort the whole migration — the marker is

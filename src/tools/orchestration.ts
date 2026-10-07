@@ -99,6 +99,23 @@ function spawnHint(kind: unknown, cwd?: string): string | undefined {
   return SUBAGENT_ROLES.general + REPORT_RULE
 }
 
+/**
+ * The `tools:`/`model:` constraints a custom sub-agent type declares. Built-in
+ * roles have none (their toolset is the agent loop's default). An `explore`/`plan`
+ * role gets a read-only toolset — those prompts say "do not modify files", and a
+ * prompt is a request, not a restriction.
+ */
+const READ_ONLY_TOOLS = ['read_file', 'grep', 'glob', 'list_dir', 'web_fetch', 'web_search', 'todo_write']
+
+function spawnLimits(kind: unknown, cwd?: string): { tools?: string[]; model?: string } {
+  const key = String(kind ?? 'general').toLowerCase()
+  if (key === 'explore' || key === 'plan') return { tools: READ_ONLY_TOOLS }
+  if (SUBAGENT_ROLES[key]) return {}
+  const custom = findAgent(key, cwd ?? process.cwd())
+  if (!custom) return {}
+  return { tools: custom.tools, model: custom.model }
+}
+
 interface BatchTask { prompt: string; label: string; type?: unknown }
 
 // Shared engine behind `task`, `plan`, and `workflow`: run a batch of sub-agents
@@ -150,7 +167,7 @@ async function runAgentBatch(
     agents[i].startedAt = Date.now()
     emit()
     try {
-      const r = await spawn({ prompt: t.prompt, system: spawnHint(t.type, ctx.cwd), label, signal: sig })
+      const r = await spawn({ prompt: t.prompt, system: spawnHint(t.type, ctx.cwd), label, signal: sig, ...spawnLimits(t.type, ctx.cwd) })
       texts[i] = r.text
       agents[i] = { ...agents[i], state: 'done', steps: r.steps, elapsedMs: Date.now() - (agents[i].startedAt ?? Date.now()), error: r.error }
       if (r.error) agents[i].state = 'error'
@@ -200,6 +217,8 @@ async function runSwitchableAgent(
     system: spawnHint(task.type, ctx.cwd),
     label: task.label,
     signal: signal ?? ctx.signal,
+    // A custom type's `tools:`/`model:` are enforced here, not merely suggested.
+    ...spawnLimits(task.type, ctx.cwd),
     // Each sub-agent event feeds the live transcript + the switcher's activity word.
     onEvent: (ev) => {
       events.push(ev)

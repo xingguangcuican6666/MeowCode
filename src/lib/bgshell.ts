@@ -9,7 +9,8 @@
 //
 // Module-level singleton so shells OUTLIVE a turn (they're meant to): everything
 // is in-memory and killed on /clear or process exit.
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { spawnShell, killTree } from './shell'
 
 export type BgStatus = 'running' | 'completed' | 'failed' | 'killed'
 
@@ -59,13 +60,14 @@ export function startBgShell(command: string, cwd: string, timeoutMs?: number): 
   const active = [...shells.values()].filter((s) => s.status === 'running').length
   if (active >= MAX_SHELLS) return { error: `too many background shells (max ${MAX_SHELLS}); kill some first` }
   const id = `bash_${++seq}`
-  const child = spawn(command, { cwd, shell: '/bin/bash', stdio: ['ignore', 'pipe', 'pipe'] })
+  // A tracked process-group leader: kill/timeout/exit reach grandchildren too.
+  const child = spawnShell(command, { cwd })
   const s: BgShell = {
     id, command, startedAt: Date.now(), child, status: 'running', exitCode: null,
     stdout: '', stderr: '', outCursor: 0, errCursor: 0, killed: false, timer: null,
   }
   if (timeoutMs && timeoutMs > 0) {
-    s.timer = setTimeout(() => { s.killed = true; try { child.kill('SIGKILL') } catch { /* gone */ } }, timeoutMs)
+    s.timer = setTimeout(() => { s.killed = true; killTree(child, 'SIGKILL') }, timeoutMs)
   }
   child.stdout?.on('data', (d: Buffer) => append(s, 'stdout', d.toString('utf8')))
   child.stderr?.on('data', (d: Buffer) => append(s, 'stderr', d.toString('utf8')))
@@ -73,14 +75,18 @@ export function startBgShell(command: string, cwd: string, timeoutMs?: number): 
     if (s.timer) { clearTimeout(s.timer); s.timer = null }
     s.status = 'failed'; s.error = err.message; s.endedAt = Date.now()
   })
-  child.on('close', (code) => {
+  // Settle on 'exit' (after a short pipe-drain grace) as well as 'close': a
+  // grandchild that inherited the pipes would otherwise keep the shell "running"
+  // forever after its leader is gone.
+  const settle = (code: number | null): void => {
     if (s.timer) { clearTimeout(s.timer); s.timer = null }
-    if (s.status !== 'failed') {
-      s.status = s.killed ? 'killed' : code === 0 ? 'completed' : 'failed'
-      s.exitCode = code
-      s.endedAt = Date.now()
-    }
-  })
+    if (s.status !== 'running') return
+    s.status = s.killed ? 'killed' : code === 0 ? 'completed' : 'failed'
+    s.exitCode = code
+    s.endedAt = Date.now()
+  }
+  child.on('exit', (code) => { setTimeout(() => settle(code), 200).unref() })
+  child.on('close', (code) => settle(code))
   shells.set(id, s)
   return { shell: s }
 }
@@ -120,9 +126,9 @@ export function killBgShell(id: string): boolean {
   if (s.status === 'running') {
     s.killed = true
     if (s.timer) { clearTimeout(s.timer); s.timer = null }
-    try { s.child.kill('SIGTERM') } catch { /* gone */ }
+    killTree(s.child, 'SIGTERM')
     // Escalate if it ignores SIGTERM.
-    setTimeout(() => { if (s.status === 'running') try { s.child.kill('SIGKILL') } catch { /* gone */ } }, 2000)
+    setTimeout(() => { if (s.status === 'running') killTree(s.child, 'SIGKILL') }, 2000).unref()
   }
   return true
 }
@@ -135,7 +141,7 @@ export function listBgShells(): BgShell[] {
 export function clearBgShells(): void {
   for (const s of shells.values()) {
     if (s.timer) clearTimeout(s.timer)
-    try { s.child.kill('SIGKILL') } catch { /* gone */ }
+    killTree(s.child, 'SIGKILL')
   }
   shells.clear()
 }

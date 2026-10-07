@@ -9,3 +9,14 @@ export function clip(s: string, max = MAX_OUT): string {
   if (s.length <= max) return s
   return s.slice(0, max) + `\n… [truncated ${s.length - max} chars]`
 }
+
+/**
+ * Like `clip`, but keeps the start AND the end: build/test output puts the failure
+ * at the bottom, so cutting only the tail would throw away exactly the useful part.
+ */
+export function clipMiddle(s: string, max = MAX_OUT): string {
+  if (s.length <= max) return s
+  const head = Math.floor(max * 0.6)
+  const tail = max - head
+  return `${s.slice(0, head)}\n… [${s.length - max} chars truncated] …\n${s.slice(-tail)}`
+}

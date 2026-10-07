@@ -12,6 +12,10 @@
 // so they only ever get the deterministic part of the policy (plan mode denies
 // mutations); everything else a sub-agent may do runs.
 
+import { globToRegExp } from '../lib/glob'
+import path from 'node:path'
+import os from 'node:os'
+
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
 
 export const PERMISSION_MODES: readonly PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions']
@@ -34,7 +38,7 @@ export function nextPermissionMode(mode: PermissionMode): PermissionMode {
 // else in the toolset is read-only (read_file/grep/glob/list_dir) or an
 // orchestration wrapper (task/plan/workflow/agent_*) that itself spawns sub-agents
 // rather than mutating directly.
-const MUTATING = new Set(['write_file', 'edit_file', 'notebook_edit', 'bash'])
+const MUTATING = new Set(['write_file', 'edit_file', 'notebook_edit', 'bash', 'monitor'])
 // The file-editing tools specifically — `acceptEdits` auto-approves these but
 // still prompts for `bash` (which can do anything).
 const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'notebook_edit'])
@@ -58,13 +62,14 @@ const PLAN_DENY_REASON =
 /**
  * Decide how a tool call should be handled under the given permission mode.
  * `autoModeInPlan` lets read-only tools run without a prompt while planning.
- * `sub` marks a sub-agent call — sub-agents can't show a dialog, so an 'ask'
- * collapses to 'allow' (the deterministic plan-mode denial still applies).
+ * `sub` marks a sub-agent call — sub-agents can't show a dialog, so in plan mode
+ * they inherit the deterministic read-only denial, and in other modes they return
+ * 'ask' for mutating tools (the caller must route or deny, since sub has no dialog).
  */
 export function decidePermission(
   mode: PermissionMode,
   tool: string,
-  opts: { autoModeInPlan?: boolean; sub?: boolean } = {},
+  opts: { autoModeInPlan?: boolean; sub?: boolean; input?: Record<string, unknown> } = {},
 ): PermissionAction {
   const { autoModeInPlan = false, sub = false } = opts
 
@@ -81,14 +86,28 @@ export function decidePermission(
     return { action: 'ask' }
   }
 
-  // Sub-agents run autonomously in the remaining modes.
-  if (sub) return { action: 'allow' }
+  // Sub-agents can't prompt: mutating tools need parent approval (return 'ask' so
+  // the caller routes or denies), non-mutating tools proceed.
+  if (sub) {
+    if (mutating) return { action: 'ask' }
+    return { action: 'allow' }
+  }
 
   if (!mutating) return { action: 'allow' }
 
   if (mode === 'acceptEdits') {
-    // Auto-accept file edits; still confirm arbitrary shell.
-    if (EDIT_TOOLS.has(tool)) return { action: 'allow' }
+    // Auto-accept file edits ONLY within the working directory and excluding
+    // protected paths (.git, .meowcode, shell rc files). This mirrors Claude Code's
+    // acceptEdits behavior: safe automation for in-project changes, but still prompt
+    // for anything that could affect the user's system or repository integrity.
+    if (EDIT_TOOLS.has(tool)) {
+      const target = ruleTarget(tool, opts.input || {})
+      if (target && isProtectedPath(target)) {
+        // Protected path (outside workspace or sensitive file) — prompt the user.
+        return { action: 'ask' }
+      }
+      return { action: 'allow' }
+    }
     return { action: 'ask' }
   }
 
@@ -126,10 +145,57 @@ const TOOL_ALIASES: Record<string, string> = {
   grep: 'grep', glob: 'glob', listdir: 'list_dir', ls: 'list_dir',
 }
 
-// Compile a glob (only `*` is special) to an anchored, case-sensitive RegExp.
-function globToRe(glob: string): RegExp {
-  const esc = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
-  return new RegExp(`^${esc}$`)
+// Shell metacharacters that delimit commands or redirect output: when a bash rule
+// pattern contains any of these, the whole pattern must match the command exactly
+// (no glob expansion) — otherwise "git *" would match "git status && rm -rf /" via
+// the `*` wildcard, letting a chained command bypass the intent.
+const BASH_META = /[;&|<>$()`]/
+
+// Safe glob matching for bash commands: if the pattern contains shell metacharacters
+// (command separators, redirects, subshells) it must match exactly (no wildcards),
+// else compile as a glob. This prevents "git *" from matching "rm -rf / && git ok".
+function bashGlobRe(pattern: string): RegExp {
+  if (BASH_META.test(pattern)) {
+    // Exact match only — escape everything.
+    const esc = pattern.replace(/[.+^$()|[\]\\*?]/g, '\\$&')
+    return new RegExp(`^${esc}$`)
+  }
+  // No metacharacters: safe to glob-expand.
+  return globToRegExp(pattern)
+}
+
+// Is this path protected from auto-accept in acceptEdits mode? Protected paths are:
+// - Outside the working directory (absolute paths not under cwd, or ~ paths)
+// - Inside .git/ or .meowcode/ (repo/tool internals)
+// - Shell rc files (.bashrc, .zshrc, etc.) anywhere in the tree
+// Returns true → prompt the user; false → safe to auto-accept.
+function isProtectedPath(absolutePath: string): boolean {
+  if (!absolutePath) return false
+
+  // Normalize both paths for comparison (resolve symlinks, trailing slashes)
+  const normPath = path.resolve(absolutePath)
+  const normCwd = path.resolve(process.cwd())
+
+  // Outside working directory?
+  if (!normPath.startsWith(normCwd + path.sep) && normPath !== normCwd) {
+    return true
+  }
+
+  // Protected directories within the workspace
+  const rel = path.relative(normCwd, normPath)
+  const parts = rel.split(path.sep)
+  if (parts[0] === '.git' || parts[0] === '.meowcode') {
+    return true
+  }
+
+  // Shell rc files (anywhere in tree, including ~/ edits that somehow got through)
+  const basename = path.basename(normPath)
+  const rcFiles = ['.bashrc', '.bash_profile', '.zshrc', '.zshenv', '.profile', '.fishrc', '.config/fish/config.fish']
+  if (rcFiles.some(rc => normPath.endsWith(rc) || basename === rc)) {
+    return true
+  }
+
+  return false
 }
 
 // Does a rule's tool token refer to the tool actually being called?
@@ -137,7 +203,7 @@ function toolMatches(ruleTool: string, actual: string): boolean {
   const r = ruleTool.trim()
   if (!r) return false
   if (r === '*') return true
-  if (r.includes('*')) return globToRe(r).test(actual)          // e.g. mcp__github__*
+  if (r.includes('*')) return globToRegExp(r).test(actual)      // e.g. mcp__github__*
   const rl = r.toLowerCase()
   if (rl === actual.toLowerCase()) return true
   return TOOL_ALIASES[rl.replace(/_/g, '')] === actual
@@ -145,17 +211,29 @@ function toolMatches(ruleTool: string, actual: string): boolean {
 
 // The string a rule's pattern is matched against, per tool. Empty when the tool
 // has no natural target (then only a bare, pattern-less rule can match it).
+// File paths are normalized to absolute (resolve ~, relative paths, ..) so rules
+// reliably match regardless of how the tool input spelled the path.
 function ruleTarget(tool: string, input: Record<string, unknown>): string {
   const i = input ?? {}
   const s = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  // Normalize a file path: resolve ~, relative paths, and .. to absolute
+  const normalizePath = (p: string): string => {
+    if (!p) return ''
+    const expanded = p.startsWith('~') ? p.replace(/^~/, os.homedir()) : p
+    return path.resolve(process.cwd(), expanded)
+  }
+
   switch (tool) {
     case 'bash': return s(i.command)
-    case 'read_file': case 'write_file': case 'edit_file': return s(i.path) || s(i.file_path)
-    case 'notebook_edit': return s(i.notebook_path) || s(i.path)
+    case 'read_file': case 'write_file': case 'edit_file':
+      return normalizePath(s(i.path) || s(i.file_path))
+    case 'notebook_edit':
+      return normalizePath(s(i.notebook_path) || s(i.path))
     case 'web_fetch': return s(i.url)
     case 'web_search': return s(i.query)
     case 'grep': case 'glob': return s(i.pattern)
-    case 'list_dir': return s(i.path)
+    case 'list_dir': return normalizePath(s(i.path))
     default: return tool.startsWith('mcp__') ? tool : ''
   }
 }
@@ -183,7 +261,10 @@ function ruleMatches(rule: string, tool: string, input: Record<string, unknown>)
     return !!want && !!host && (host === want || host.endsWith(`.${want}`))
   }
   if (!target) return false
-  return globToRe(pattern).test(target)
+  // Bash commands need special handling: a pattern with shell metacharacters must
+  // match exactly (no glob expansion) to prevent "git *" from matching chained cmds.
+  const re = tool === 'bash' ? bashGlobRe(pattern) : globToRegExp(pattern)
+  return re.test(target)
 }
 
 function anyRuleMatches(rules: string[] | undefined, tool: string, input: Record<string, unknown>): boolean {

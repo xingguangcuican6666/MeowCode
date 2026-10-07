@@ -79,6 +79,14 @@ export interface SpawnOpts {
   // this sub-agent, so a BACKGROUND run can be cancelled independently of the main
   // turn (see lib/background + useChat.interrupt). Absent = use the turn's signal.
   signal?: AbortSignal
+  // A custom sub-agent's `tools:` front-matter, ENFORCED: the sub-agent is sent only
+  // these tool schemas. Absent = the usual sub-agent toolset. (It used to be
+  // advisory — declared in the .md and then ignored, so an agent documented as
+  // read-only still got write_file.)
+  tools?: string[]
+  // A custom sub-agent's `model:` front-matter — the model this sub-agent runs on.
+  // Absent = inherit the parent's.
+  model?: string
 }
 
 export interface SpawnResult {

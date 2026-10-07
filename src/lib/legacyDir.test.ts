@@ -119,6 +119,18 @@ describe('detection', () => {
 })
 
 describe('mergeLegacyDir', () => {
+  it('lands a migrated credentials.json at 0600 even if the old one was loose', () => {
+    seedLegacy({ 'credentials.json': '{"token":"secret"}' })
+    // The pre-rename file could predate the 0600 rule, or have been edited under a
+    // loose umask. copyFileSync carries the SOURCE's mode, so without a chmod the
+    // secret would arrive world-readable and stay that way until the next login.
+    fs.chmodSync(path.join(LEGACY_CONFIG_DIR, 'credentials.json'), 0o644)
+    mergeLegacyDir()
+    const mode = fs.statSync(path.join(CONFIG_DIR, 'credentials.json')).mode & 0o777
+    expect(mode).toBe(0o600)
+  })
+
+
   it('copies known files and content trees, and stamps the marker', () => {
     seedLegacy({
       'settings.json': '{"model":"old"}',
