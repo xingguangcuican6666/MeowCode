@@ -1,6 +1,15 @@
 export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: string }> = []): string {
+  // Inline script bodies are terminated by the *parser*, not by JavaScript: a
+  // literal `</script` anywhere in the source — even inside a string or a
+  // comment — ends the element right there. That turns one careless plugin file
+  // into markup the browser executes in the origin that holds the auth cookie,
+  // and leaves the rest of the plugin as visibly broken HTML. `<\\/script` is
+  // equivalent to `</script` to a JS parser, so a plugin that means it still
+  // means it after this rewrite. Nothing else needs neutralising: `\x3C/script`
+  // and friends never matched the tag close to begin with.
+  const inlineSafe = (source: string): string => source.replace(/<\/(script)/gi, '<\\/$1')
   const pluginTags = pluginScripts
-    .map((p) => `\n<!-- Plugin: ${p.id} -->\n<script>\n${p.script}\n</script>`)
+    .map((p) => `\n<!-- Plugin: ${p.id} -->\n<script>\n${inlineSafe(p.script)}\n</script>`)
     .join('\n')
 
   return `<!DOCTYPE html>
@@ -10,6 +19,11 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MeowCode WebUI — Material 3 Expressive Studio</title>
   <meta name="description" content="MeowCode WebUI built-in harness with Google Material 3 Expressive (M3E) design, theme switching, and extension SDK." />
+  <!-- Inline SVG mark, so the tab icon costs no request and never 404s. It hardcodes
+       the light-scheme primary from client/css.ts rather than a token: a favicon is
+       resolved by the browser before any stylesheet is parsed, so a CSS custom property
+       would not be defined yet. '#' is percent-encoded because this sits in a data URI. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231A73E8'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -241,6 +255,11 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
             </div>
 
             <div class="input-dock-card">
+              <!-- Transient provider-retry notice (see app.ts appendRetryNotice) -->
+              <div id="retry-notice" class="retry-notice hidden" role="status" aria-live="polite"></div>
+              <!-- Live sub-agent / workflow chips (see app.ts updateAgentView) -->
+              <div id="subagent-strip" class="subagent-strip hidden"></div>
+
               <!-- Slot: chat:toolbar (Quick Filter Chips / Prompt Pills) -->
               <div class="meow-slot chat-toolbar-slot" data-slot="chat:toolbar"></div>
 
@@ -269,6 +288,10 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
                 </div>
 
                 <div class="input-right-actions">
+                  <button id="queue-btn" class="m3-btn" style="display:none;" data-i18n-title="common.queueTitle" title="Queue for the running turn">
+                    <span class="material-symbols-outlined">playlist_add</span>
+                    <span data-i18n="common.queue">Queue</span>
+                  </button>
                   <button id="abort-btn" class="m3-btn m3-btn-danger" style="display:none;" data-i18n-title="common.stopTitle" title="Stop generation (Esc)">
                     <span class="material-symbols-outlined">stop</span>
                     <span data-i18n="common.stop">Stop</span>
@@ -310,6 +333,10 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   <!-- Toast Notification Host -->
   <div id="toast-host" class="toast-host"></div>
 
+  <!-- Single polite live region. app.js speaks into it at turn/command
+       milestones — streaming text is far too chatty to announce per chunk. -->
+  <div id="meow-live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
   <!-- M3 File Picker Modal Dialog -->
   <div id="file-picker-modal" class="modal-backdrop" style="display:none;">
     <div class="modal-container file-picker-container">
@@ -334,13 +361,13 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
     </div>
   </div>
 
-  <!-- M3 Command Palette Modal Dialog -->
+  <!-- M3 Command Palette Modal Dialog: master (list) + detail (preview) -->
   <div id="cmd-palette-modal" class="modal-backdrop" style="display:none;">
-    <div class="modal-container cmd-palette-container">
+    <div class="modal-container cmd-palette-container" role="dialog" aria-modal="true" aria-labelledby="cmd-palette-title">
       <div class="modal-header">
         <div class="modal-header-title-cluster">
           <span class="material-symbols-outlined modal-icon">terminal</span>
-          <span class="modal-title" data-i18n="modal.cmd.title">Command Palette</span>
+          <span class="modal-title" id="cmd-palette-title" data-i18n="modal.cmd.title">Command Palette</span>
         </div>
         <button class="modal-close-btn" id="cmd-palette-close-btn" data-i18n-title="common.close" title="Close (Esc)"><span class="material-symbols-outlined">close</span></button>
       </div>
@@ -348,11 +375,13 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
         <span class="material-symbols-outlined search-icon">search</span>
         <input type="text" id="cmd-palette-search-input" class="modal-search-input" data-i18n-placeholder="modal.cmd.searchPlaceholder" placeholder="Type a slash command or search..." />
       </div>
-      <div class="modal-body cmd-palette-body" id="cmd-palette-list">
-        <!-- Dynamic commands -->
+      <div class="cmd-palette-body">
+        <div class="cmd-palette-list-pane" id="cmd-palette-list" role="listbox" aria-label="Commands" data-i18n-aria-label="modal.cmd.list"></div>
+        <div class="cmd-palette-preview-pane" id="cmd-palette-preview" aria-live="polite"></div>
       </div>
       <div class="modal-footer">
-        <span class="modal-footer-hint text-dim text-xs" data-i18n="modal.cmd.hint">Press Enter or click to execute</span>
+        <span class="modal-footer-hint text-dim text-xs" id="cmd-palette-hint" data-i18n="modal.cmd.hint">Press Enter or click to execute</span>
+        <span class="text-dim text-xs" id="cmd-palette-count"></span>
         <button class="m3-action-btn m3-btn-tonal" id="cmd-palette-cancel-btn" data-i18n="common.cancel">Cancel</button>
       </div>
     </div>
@@ -423,7 +452,7 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   </div>
 
   <!-- Floating Settings Modal Dialog (Claude Code Style) -->
-  <div id="settings-modal" class="modal-backdrop settings-modal-backdrop" style="display:none;">
+  <div id="settings-modal" class="modal-backdrop modal-backdrop-settings" style="display:none;">
     <div class="settings-dialog-card" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
       <!-- Top-right Close Button -->
       <button id="settings-close-btn" class="settings-close-btn" data-i18n-title="common.close" title="Close (Esc)">
@@ -438,84 +467,10 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
           <input type="text" id="settings-search-input" class="settings-search-field" data-i18n-placeholder="settings.searchPlaceholder" placeholder="搜索..." />
         </div>
 
-        <div class="settings-nav-scroll" id="settings-nav-scroll">
-          <!-- Section 1: 设置 (SETTINGS) -->
-          <div class="settings-nav-group-title" data-i18n="settings.section.settings">设置</div>
-          <button class="settings-nav-item active" data-tab="general">
-            <span class="material-symbols-outlined nav-item-icon">settings</span>
-            <span class="nav-item-text" data-i18n="settings.nav.general">常规</span>
-          </button>
-          <button class="settings-nav-item" data-tab="account">
-            <span class="material-symbols-outlined nav-item-icon">account_circle</span>
-            <span class="nav-item-text" data-i18n="settings.nav.account">账户</span>
-          </button>
-          <button class="settings-nav-item" data-tab="privacy">
-            <span class="material-symbols-outlined nav-item-icon">security</span>
-            <span class="nav-item-text" data-i18n="settings.nav.privacy">隐私</span>
-          </button>
-          <button class="settings-nav-item" data-tab="billing">
-            <span class="material-symbols-outlined nav-item-icon">credit_card</span>
-            <span class="nav-item-text" data-i18n="settings.nav.billing">账单</span>
-          </button>
-          <button class="settings-nav-item" data-tab="capabilities">
-            <span class="material-symbols-outlined nav-item-icon">apps</span>
-            <span class="nav-item-text" data-i18n="settings.nav.capabilities">功能</span>
-          </button>
-          <button class="settings-nav-item" data-tab="memory">
-            <span class="material-symbols-outlined nav-item-icon">psychology</span>
-            <span class="nav-item-text" data-i18n="settings.nav.memory">记忆</span>
-          </button>
-          <button class="settings-nav-item" data-tab="reflection">
-            <span class="material-symbols-outlined nav-item-icon">notifications_active</span>
-            <span class="nav-item-text" data-i18n="settings.nav.reflection">反思</span>
-          </button>
-          <button class="settings-nav-item" data-tab="focus">
-            <span class="material-symbols-outlined nav-item-icon">schedule</span>
-            <span class="nav-item-text" data-i18n="settings.nav.focus">时间与专注</span>
-          </button>
-          <button class="settings-nav-item" data-tab="meowcode">
-            <span class="material-symbols-outlined nav-item-icon">code</span>
-            <span class="nav-item-text" data-i18n="settings.nav.meowcode">Claude Code</span>
-          </button>
-
-          <!-- Section 2: 此电脑 (THIS MACHINE) -->
-          <div class="settings-nav-group-title" data-i18n="settings.section.machine">此电脑</div>
-          <button class="settings-nav-item" data-tab="system">
-            <span class="material-symbols-outlined nav-item-icon">desktop_windows</span>
-            <span class="nav-item-text" data-i18n="settings.nav.system">系统</span>
-          </button>
-          <button class="settings-nav-item" data-tab="extensions">
-            <span class="material-symbols-outlined nav-item-icon">extension</span>
-            <span class="nav-item-text" data-i18n="settings.nav.extensions">扩展</span>
-          </button>
-          <button class="settings-nav-item" data-tab="developer">
-            <span class="material-symbols-outlined nav-item-icon">terminal</span>
-            <span class="nav-item-text" data-i18n="settings.nav.developer">开发者</span>
-          </button>
-
-          <!-- Section 3: 自定义 (CUSTOMIZATION) -->
-          <div class="settings-nav-group-title" data-i18n="settings.section.custom">自定义</div>
-          <button class="settings-nav-item" data-tab="skills">
-            <span class="material-symbols-outlined nav-item-icon">menu_book</span>
-            <span class="nav-item-text" data-i18n="settings.nav.skills">Skills</span>
-          </button>
-          <button class="settings-nav-item" data-tab="connectors">
-            <span class="material-symbols-outlined nav-item-icon">hub</span>
-            <span class="nav-item-text" data-i18n="settings.nav.connectors">连接器</span>
-          </button>
-          <button class="settings-nav-item" data-tab="plugins">
-            <span class="material-symbols-outlined nav-item-icon">power</span>
-            <span class="nav-item-text" data-i18n="settings.nav.plugins">插件</span>
-          </button>
-
-          <!-- Section 4: 平台 (PLATFORM) -->
-          <div class="settings-nav-group-title" data-i18n="settings.section.platform">平台</div>
-          <button class="settings-nav-item" data-tab="apikeys">
-            <span class="material-symbols-outlined nav-item-icon">key</span>
-            <span class="nav-item-text" data-i18n="settings.nav.apiKeys">API 密钥</span>
-            <span class="material-symbols-outlined nav-item-ext-icon">open_in_new</span>
-          </button>
-        </div>
+        <!-- One scrolling list of the six real SETTINGS groups, rendered from
+             /api/settings so it can never drift from /config. Scrollspy
+             highlights the group whose rows fill the viewport. -->
+        <div class="settings-nav-scroll" id="settings-nav-scroll"></div>
       </aside>
 
       <!-- Right Column: Settings Content -->

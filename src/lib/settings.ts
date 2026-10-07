@@ -12,6 +12,13 @@ export type SettingValue = boolean | string | number
 
 export type SettingType = 'boolean' | 'enum' | 'number' | 'string'
 
+/**
+ * Which surface a setting shows up on. Defaults to 'both' when omitted, so an
+ * ordinary setting keeps rendering in /config and in the WebUI settings pane
+ * with no extra work; only rows that genuinely differ need to say so.
+ */
+export type SettingSurface = 'tui' | 'web'
+
 export interface SettingSpec {
   key: string
   label: string
@@ -23,6 +30,8 @@ export interface SettingSpec {
   max?: number
   unit?: string      // display suffix for numbers, e.g. 's'
   description: string
+  /** Omit for 'both'. 'tui' = the WebUI shows the row disabled; 'web' = /config hides it. */
+  surfaces?: SettingSurface[]
 }
 
 // Ordered so /config groups read top-to-bottom like the real Config tab.
@@ -81,6 +90,14 @@ export const SETTINGS: SettingSpec[] = [
   { key: 'autoConnectIde', label: 'Auto-connect to IDE (external terminal)', group: 'Advanced', type: 'boolean', default: false, description: 'Connect to a running IDE from an external terminal' },
   { key: 'chromeEnabled', label: 'Claude in Chrome enabled by default', group: 'Advanced', type: 'boolean', default: false, description: 'Enable the Chrome integration for new sessions' },
   { key: 'disableAllHooks', label: 'Disable all hooks', group: 'Advanced', type: 'boolean', default: false, description: 'Turn every configured hook off at once without removing it from settings' },
+  // Web UI only. These used to live in the browser's localStorage, which meant the
+  // WebUI and the TUI each had their own copy of the same preference; they are
+  // rows here so both surfaces read one table (and one saved config) again.
+  { key: 'chatWidth', label: 'Chat width', group: 'Web interface', type: 'enum', values: ['640', '860', '1200'], default: '860', description: 'Width of the conversation column in the WebUI', surfaces: ['web'] },
+  { key: 'chatFont', label: 'Chat font', group: 'Web interface', type: 'enum', values: ['Outfit', 'Anthropic Serif', 'JetBrains Mono', 'system-ui'], default: 'Outfit', description: 'Typeface for the conversation transcript', surfaces: ['web'] },
+  { key: 'notifyTurn', label: 'Notify when a turn ends', group: 'Web interface', type: 'boolean', default: true, description: 'Desktop notification once a turn finishes', surfaces: ['web'] },
+  { key: 'speechStyle', label: 'Speech style', group: 'Web interface', type: 'enum', values: ['soft', 'professional'], default: 'soft', description: 'Voice used when reading a response aloud', surfaces: ['web'] },
+  { key: 'speechSpeed', label: 'Speech speed', group: 'Web interface', type: 'enum', values: ['normal', 'fast'], default: 'normal', description: 'Rate for read-aloud playback', surfaces: ['web'] },
 ]
 
 export const SETTINGS_BY_KEY: Record<string, SettingSpec> = Object.fromEntries(

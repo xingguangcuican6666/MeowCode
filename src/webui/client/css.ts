@@ -148,6 +148,19 @@ export const CLIENT_CSS = `
   --header-height: 60px;
   --statusbar-height: 32px;
   --sidebar-width: 260px;
+
+  /* Settings pane geometry (schema-driven rows, see client/app.ts). */
+  --settings-sidebar-width: 220px;
+  --settings-row-min-height: 52px;
+  --settings-row-padding-y: 10px;
+  --settings-row-padding-x: 16px;
+  --settings-ctrl-max-width: 250px;
+
+  /* Command palette: a two-pane master-detail, list left / preview right. */
+  --cmd-palette-width: 820px;
+  --cmd-palette-list-width: 480px;
+  --cmd-palette-preview-width: 340px;
+  --cmd-palette-row-height: 48px;
 }
 
 /* Reset */
@@ -1500,6 +1513,22 @@ html, body {
   justify-content: flex-end;
   gap: 10px;
 }
+/* The hint states the current keyboard contract and the count says how much of
+   the registry survived the filter; both push left, away from the buttons. */
+.modal-footer .modal-footer-hint {
+  margin-right: auto;
+}
+
+/* A confirm dialog for a destructive action tints its affirmative button, so the
+   two answers never look equally weighted. */
+.modal-container.is-destructive .modal-btn-confirm {
+  background: var(--md-sys-color-error);
+  color: var(--md-sys-color-on-error);
+  border-color: var(--md-sys-color-error);
+}
+.modal-container.is-destructive .modal-btn-confirm:hover {
+  filter: brightness(1.08);
+}
 
 /* M3 Snackbars (Toasts) */
 .toast-host {
@@ -1619,58 +1648,371 @@ html, body {
   flex-shrink: 0;
 }
 
-/* Command Palette */
+/* --- Command Palette (master-detail) -------------------------------------
+   The list pane owns selection, the preview pane owns explanation. Only one of
+   them carries the focus at a time: .is-in-preview on the container moves the
+   focus ring from the list rows to the preview's action button. */
+.cmd-palette-container {
+  width: var(--cmd-palette-width);
+  max-width: min(var(--cmd-palette-width), calc(100vw - 32px));
+}
 .cmd-palette-body {
-  max-height: 400px;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  height: min(440px, calc(100vh - 220px));
+  /* Full-bleed: the pane divider should reach the card's edges, so the two panes
+     scroll against the frame rather than inside an inset. */
+  margin: 0 -20px;
+  overflow: hidden;
+}
+.cmd-palette-list-pane {
+  flex: 0 0 var(--cmd-palette-list-width);
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 8px;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+}
+.cmd-palette-preview-pane {
+  flex: 0 0 var(--cmd-palette-preview-width);
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--md-sys-color-surface-container-low);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 12px;
+}
+/* With the preview focused, the list's selection tint recedes — two panes both
+   claiming the focus would make it ambiguous which one Enter acts on. */
+.cmd-palette-container.is-in-preview .cmd-palette-row.is-focused {
+  background: transparent;
+  border-left-color: var(--md-sys-color-outline);
+}
+.cmd-palette-container.is-in-preview .cmd-palette-preview-pane {
+  box-shadow: inset 2px 0 0 var(--md-sys-color-primary);
+}
+/* Below the two-column threshold the preview is worthless side-by-side, so it
+   stacks under the list instead of squeezing both into unreadable slivers. */
+@media (max-width: 720px) {
+  .cmd-palette-body {
+    flex-direction: column;
+    height: min(520px, calc(100vh - 200px));
+  }
+  .cmd-palette-list-pane {
+    flex: 1 1 auto;
+    border-right: none;
+    border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  }
+  .cmd-palette-preview-pane {
+    flex: 0 0 auto;
+    max-height: 40%;
+  }
+}
+.cmd-palette-group {
+  padding: 12px 10px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.cmd-palette-group:first-child {
+  padding-top: 4px;
+}
+/* Group headers stay put while the list scrolls: a 57-row palette is taller than
+   the pane, and a bare header that scrolls away takes the only cue for which
+   bucket the rows under it belong to. */
+.cmd-palette-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 .cmd-palette-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-radius: var(--md-shape-md);
+  gap: 12px;
+  min-height: var(--cmd-palette-row-height);
+  padding: 8px 10px;
+  border-radius: var(--md-shape-sm);
   cursor: pointer;
-  transition: all var(--md-motion-duration-short);
+  border-left: 3px solid transparent;
+  transition:
+    background-color var(--md-motion-duration-short) var(--md-motion-easing-decelerate),
+    border-color var(--md-motion-duration-short) var(--md-motion-easing-decelerate);
 }
 .cmd-palette-row:hover {
-  background: var(--md-sys-color-surface-container-highest);
-  transform: translateX(2px);
+  background: var(--md-sys-color-surface-container-high);
 }
-.cmd-palette-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
+.cmd-palette-row.is-focused {
+  background: var(--md-sys-color-secondary-container);
+  border-left-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-secondary-container);
+}
+.cmd-palette-row.is-focused .cmd-palette-title,
+.cmd-palette-row.is-focused .cmd-palette-desc {
+  color: var(--md-sys-color-on-secondary-container);
 }
 .cmd-palette-icon {
-  font-size: 18px;
+  font-size: 20px;
   flex-shrink: 0;
+  color: var(--md-sys-color-primary);
 }
 .cmd-palette-info {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 .cmd-palette-title {
   font-weight: 600;
   font-size: 13.5px;
   color: var(--md-sys-color-on-surface);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .cmd-palette-desc {
   font-size: 11.5px;
   color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.cmd-palette-chip {
+/* "CLI" — the command works in the terminal only. It stays legible rather than
+   being dimmed out of reach, because the palette still offers it: copy the line. */
+.cmd-chip-terminal {
+  font-family: var(--font-family-code);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--md-shape-xs);
+  background: var(--badge-web-bg);
+  color: var(--badge-web-text);
+  flex-shrink: 0;
+}
+.cmd-preview-empty {
+  margin: auto;
+  text-align: center;
+  line-height: 1.6;
+}
+.cmd-preview-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.cmd-preview-icon {
+  font-size: 22px;
+  color: var(--md-sys-color-primary);
+  flex-shrink: 0;
+}
+.cmd-preview-title {
+  font-family: var(--font-family-code);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface);
+  word-break: break-all;
+}
+.cmd-preview-desc {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.cmd-preview-aliases {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+.cmd-preview-aliases code {
   font-family: var(--font-family-code);
   font-size: 11px;
-  background: rgba(128, 128, 128, 0.14);
-  padding: 2px 8px;
+  color: var(--md-sys-color-on-surface);
+  background: var(--md-sys-color-surface-container-highest);
+  padding: 1px 5px;
   border-radius: var(--md-shape-xs);
-  color: var(--md-sys-color-primary);
+}
+.cmd-preview-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.cmd-preview-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cmd-preview-pill {
+  font-size: 10.5px;
   font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--md-shape-full);
+}
+.cmd-preview-pill.is-web {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+.cmd-preview-pill.is-terminal {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+.cmd-preview-hint {
+  line-height: 1.55;
+}
+.cmd-preview-run {
+  margin-top: auto;
+  width: 100%;
+}
+
+/* --- Generic dialog widgets ---------------------------------------------
+   Four shapes, one set of tokens: an enum of radio cards, a searchable list, a
+   confirmation, and free text. */
+.dialog-enum {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.dialog-enum-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--md-shape-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--md-motion-duration-short) var(--md-motion-easing-decelerate);
+}
+.dialog-enum-row:hover {
+  background: var(--md-sys-color-surface-container-high);
+}
+.dialog-enum-row.is-active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-color: var(--md-sys-color-primary);
+}
+/* The number that row responds to. Hidden once a row is the current value, so
+   the hint and the digits do not compete for the same attention. */
+.dialog-enum-key {
+  flex: 0 0 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-family-code);
+  font-size: 10.5px;
+  border-radius: var(--md-shape-xs);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.dialog-enum-row.is-active .dialog-enum-key {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+.dialog-enum-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dialog-enum-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.dialog-enum-desc {
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.dialog-enum-row.is-active .dialog-enum-desc {
+  color: inherit;
+  opacity: 0.82;
+}
+.dialog-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dialog-choice-search {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--md-shape-sm);
+  border: 1px solid var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface);
+  font: inherit;
+  font-size: 13px;
+}
+.dialog-choice-search:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+.dialog-choice-list {
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dialog-choice-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--md-shape-sm);
+  background: transparent;
+  color: var(--md-sys-color-on-surface);
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dialog-choice-row:hover {
+  background: var(--md-sys-color-surface-container-high);
+}
+.dialog-choice-desc {
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.dialog-confirm {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.dialog-text {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dialog-text-input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--md-shape-sm);
+  border: 1px solid var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.dialog-text-input:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
 }
 
 /* Model Selector */
@@ -2834,6 +3176,16 @@ md-assist-chip, md-filter-chip {
 :root {
   --chat-font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --chat-max-width: 860px;
+  --focus-ring-color: var(--md-sys-color-primary);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+}
+
+/* Keyboard focus must be visible everywhere, but only for keyboard users —
+   :focus would ring the mouse cursor on every click. */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 body.reduced-motion *,
@@ -2842,6 +3194,15 @@ body.reduced-motion *::after {
   animation-duration: 0.001ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;
+}
+/* Same effect for people who ask the OS, regardless of the reduceMotion setting. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Sidebar Settings Button */
@@ -2872,7 +3233,10 @@ body.reduced-motion *::after {
 /* ============================================================================
    Floating Settings Modal (Claude Code Style)
    ============================================================================ */
-.settings-modal-backdrop {
+/* Settings reuses .modal-backdrop with a modifier rather than restating the
+   backdrop: it is the deepest dialog in the stack (a settings pane can open a
+   picker on top of itself), and it dims harder so the two layers read apart. */
+.modal-backdrop-settings {
   z-index: 2000;
   background: rgba(0, 0, 0, 0.65);
   backdrop-filter: blur(8px);
@@ -2916,7 +3280,7 @@ body.reduced-motion *::after {
 
 /* Settings Left Sidebar */
 .settings-sidebar {
-  width: 220px;
+  width: var(--settings-sidebar-width);
   flex-shrink: 0;
   border-right: 1px solid var(--md-sys-color-outline-variant);
   display: flex;
@@ -3016,43 +3380,6 @@ body.reduced-motion *::after {
   flex-direction: column;
   gap: 14px;
 }
-.settings-section-header {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--md-sys-color-on-surface);
-  border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  padding-bottom: 8px;
-}
-
-.settings-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 8px 0;
-}
-.settings-row-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 60%;
-}
-.settings-row-label {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--md-sys-color-on-surface);
-}
-.settings-row-desc {
-  font-size: 12px;
-  color: var(--md-sys-color-on-surface-variant);
-  line-height: 1.4;
-}
-.settings-row-ctrl {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 /* Segmented Buttons Group */
 .m3-segmented-group {
   display: inline-flex;
@@ -3086,55 +3413,449 @@ body.reduced-motion *::after {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
-/* Modern Select Dropdown */
-.m3-select {
-  padding: 6px 32px 6px 12px;
-  border-radius: var(--md-shape-sm);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface);
-  font-size: 13px;
-  cursor: pointer;
-  outline: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' height='20' viewBox='0 -960 960 960' width='20' fill='%23888'%3E%3Cpath d='M480-345 240-585l56-56 184 184 184-184 56 56-240 240Z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 16px;
-  appearance: none;
-}
-.m3-select:focus {
-  border-color: var(--md-sys-color-primary);
-}
-
-/* Modern Switch Toggle */
-.m3-switch {
+/* The schema renderer draws its own switch so it can carry data-setting/role;
+   the settings pane never uses a legacy .m3-switch. */
+.settings-ctrl-switch {
+  flex: 0 0 auto;
   width: 44px;
   height: 24px;
+  padding: 0;
   border-radius: var(--md-shape-full);
+  border: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-highest);
   position: relative;
   cursor: pointer;
-  border: 1px solid var(--md-sys-color-outline-variant);
-  transition: all var(--md-motion-duration-short);
-  padding: 0;
+  transition: background-color var(--md-motion-duration-short) var(--md-motion-easing-emphasized),
+              border-color var(--md-motion-duration-short) var(--md-motion-easing-emphasized);
 }
-.m3-switch .switch-thumb {
+.settings-ctrl-switch .switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
   width: 18px;
   height: 18px;
   border-radius: 50%;
   background: var(--md-sys-color-on-surface-variant);
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  transition: transform var(--md-motion-duration-short), background var(--md-motion-duration-short);
+  transition: transform var(--md-motion-duration-short) var(--md-motion-easing-emphasized),
+              background-color var(--md-motion-duration-short) var(--md-motion-easing-emphasized);
 }
-.m3-switch.active {
+.settings-ctrl-switch.active {
   background: var(--md-sys-color-primary);
   border-color: var(--md-sys-color-primary);
 }
-.m3-switch.active .switch-thumb {
+.settings-ctrl-switch.active .switch-thumb {
   transform: translateX(20px);
   background: var(--md-sys-color-on-primary);
+}
+
+/* Settings controls: every one caps out so long descriptions keep the left side. */
+.settings-ctrl-select,
+.settings-ctrl-input {
+  height: 32px;
+  max-width: var(--settings-ctrl-max-width);
+  padding: 4px 10px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-sm);
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--font-family-display);
+  font-size: 13px;
+  outline: none;
+}
+.settings-ctrl-select {
+  padding-right: 28px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' height='20' viewBox='0 -960 960 960' width='20' fill='%23888'%3E%3Cpath d='M480-345 240-585l56-56 184 184 184-184 56 56-240 240Z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 16px;
+  appearance: none;
+}
+.settings-ctrl-text {
+  font-family: var(--font-family-code);
+  font-size: 12px;
+}
+.settings-ctrl-input[type="number"] {
+  width: 108px;
+}
+.settings-ctrl-input:focus,
+.settings-ctrl-select:focus {
+  border-color: var(--md-sys-color-primary);
+}
+/* A value the schema would reject gets an error ring rather than a silent clamp. */
+.settings-ctrl-input.is-invalid {
+  border-color: var(--md-sys-color-error);
+  box-shadow: 0 0 0 1px var(--md-sys-color-error);
+}
+.settings-ctrl-input:disabled,
+.settings-ctrl-select:disabled,
+.settings-ctrl-stepper[data-disabled] {
+  opacity: 0.55;
+}
+.settings-ctrl-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.settings-ctrl-stepper .stepper-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-sm);
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--md-motion-duration-short);
+}
+.settings-ctrl-stepper .stepper-btn:hover:not(:disabled) {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+.settings-ctrl-stepper .stepper-btn:disabled { cursor: default; }
+.settings-ctrl-unit {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+}
+.settings-ctrl-number {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.settings-preset-row {
+  display: flex;
+  gap: 4px;
+}
+.settings-preset-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--font-family-code);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--md-motion-duration-short);
+}
+.settings-preset-chip:hover:not(:disabled) { color: var(--md-sys-color-on-surface); }
+.settings-preset-chip.active {
+  background: var(--md-sys-color-secondary-container);
+  border-color: transparent;
+  color: var(--md-sys-color-on-secondary-container);
+  font-weight: 600;
+}
+
+/* Row states: a TUI-only row is visible but inert, a changed row carries a dot
+   and grows a reset affordance on hover. */
+.settings-row {
+  min-height: var(--settings-row-min-height);
+  padding: var(--settings-row-padding-y) var(--settings-row-padding-x);
+  border-radius: var(--md-shape-md);
+  transition: background-color var(--md-motion-duration-short);
+}
+.settings-row:hover { background: var(--md-sys-color-surface-container-low); }
+.settings-row.is-tui-only { opacity: 0.55; }
+.settings-row-info { max-width: none; flex: 1 1 auto; }
+.settings-row-desc {
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.4;
+}
+.settings-row-ctrl { flex: 0 0 auto; }
+.settings-row-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* Badge and highlight colors are tokens so the palette chip and the settings
+   badges stay in step with the scheme rather than each naming a surface. */
+:root, [data-theme="dark"] {
+  --badge-tui-bg: var(--md-sys-color-surface-container-highest);
+  --badge-tui-text: var(--md-sys-color-on-surface-variant);
+  --badge-web-bg: var(--md-sys-color-tertiary-container);
+  --badge-web-text: var(--md-sys-color-on-tertiary-container);
+  --badge-restart-bg: var(--md-sys-color-error-container);
+  --badge-restart-text: var(--md-sys-color-on-error-container);
+  --badge-dirty-dot: var(--md-sys-color-primary);
+  --search-match-bg: var(--md-sys-color-primary-container);
+  --search-match-text: var(--md-sys-color-on-primary-container);
+}
+
+.settings-badge {
+  padding: 0 6px;
+  border-radius: var(--md-shape-full);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.settings-badge-tui {
+  background: var(--badge-tui-bg);
+  color: var(--badge-tui-text);
+}
+.settings-badge-web {
+  background: var(--badge-web-bg);
+  color: var(--badge-web-text);
+}
+.settings-badge-restart {
+  background: var(--badge-restart-bg);
+  color: var(--badge-restart-text);
+}
+.settings-badge-dirty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--badge-dirty-dot);
+}
+.settings-group-tag {
+  padding: 0 6px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: none;
+}
+.settings-reset-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--md-shape-full);
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--md-motion-duration-short), background-color var(--md-motion-duration-short);
+}
+.settings-row:hover .settings-reset-btn,
+.settings-reset-btn:focus-visible { opacity: 1; }
+.settings-reset-btn:hover { background: var(--md-sys-color-surface-container-highest); }
+
+.settings-search-highlight {
+  background: var(--search-match-bg);
+  color: var(--search-match-text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.settings-search-count {
+  align-self: flex-start;
+  padding: 6px 10px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+}
+/* Sticky group headers so a long pane keeps its section labels in view. */
+.settings-section-header {
+  position: sticky;
+  top: -28px;
+  z-index: 1;
+  margin: 0 -36px;
+  padding: 10px 36px 8px 36px;
+  background: var(--md-sys-color-surface-container-low);
+}
+
+/* ============================================================================
+   Turn Feedback: Retry Notice & Sub-agent Strip
+   These mirror the TUI's status region, which sits *above* the prompt rather
+   than in the transcript — a retry or a delegated sub-agent is turn state, not
+   a message, so it must not scroll away inside the assistant card.
+   ============================================================================ */
+
+/* The TUI only carries a visible-height row per item, so clamp the strip to one
+   scrolling line; the chips stay in DOM order (spawned first -> leftmost). */
+.subagent-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.subagent-strip::-webkit-scrollbar { display: none; }
+.subagent-strip.hidden { display: none; }
+
+.subagent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 220px;
+  padding: 3px 10px 3px 8px;
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 11.5px;
+  cursor: default;
+  transition: background-color var(--md-motion-duration-short) var(--md-motion-easing-emphasized),
+              border-color var(--md-motion-duration-short) var(--md-motion-easing-emphasized);
+}
+.subagent-chip .icon-xs { font-size: 14px; }
+.subagent-chip-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.subagent-chip-steps {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--font-family-code);
+  font-size: 10px;
+  line-height: 15px;
+}
+.subagent-chip.active {
+  border-color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+.subagent-chip.active .subagent-chip-steps {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+.subagent-chip[data-subagent-kind="workflow"].active {
+  border-color: var(--md-sys-color-tertiary);
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
+/* Retry notice: aria-live so a screen reader hears the attempt counter too. */
+.retry-notice {
+  display: flex;
+  align-items: center;
+  min-height: 20px;
+  color: var(--md-sys-color-tertiary);
+  font-size: 12px;
+  animation: m3-fade-in var(--md-motion-duration-medium) var(--md-motion-easing-decelerate);
+}
+.retry-notice.hidden { display: none; }
+
+/* ============================================================================
+   Interaction Dialogs (permission allow/deny, ask_user)
+   ============================================================================ */
+
+.interaction-tool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--md-sys-color-on-surface);
+  font-size: 13.5px;
+}
+.interaction-tool .material-symbols-outlined { color: var(--md-sys-color-primary); }
+.interaction-tool code {
+  font-family: var(--font-family-code);
+  font-size: 12.5px;
+  padding: 1px 6px;
+  border-radius: var(--md-shape-xs);
+  background: var(--md-sys-color-surface-container-high);
+}
+.interaction-summary {
+  margin-bottom: 8px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.interaction-input {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-sm);
+  background: var(--md-sys-color-code-bg);
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--font-family-code);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ask-user-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ask-user-question + .ask-user-question {
+  padding-top: 18px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+.ask-user-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.ask-user-chip {
+  padding: 1px 8px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+.ask-user-question-text {
+  color: var(--md-sys-color-on-surface);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.ask-user-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ask-user-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--md-shape-sm);
+  cursor: pointer;
+  transition: background-color var(--md-motion-duration-short) var(--md-motion-easing-standard);
+}
+.ask-user-option:hover { background: var(--md-sys-color-surface-container-high); }
+.ask-user-radio {
+  flex: 0 0 auto;
+  accent-color: var(--md-sys-color-primary);
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+.ask-user-option-text {
+  color: var(--md-sys-color-on-surface);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.ask-user-option-desc {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+/* Free-text escape hatch: narrower than an option so it reads as an aside. */
+.ask-user-other {
+  flex: 1 1 160px;
+  min-width: 0;
+  margin-left: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-xs);
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--font-family-display);
+  font-size: 12.5px;
+  outline: none;
+}
+.ask-user-other:focus {
+  border-color: var(--md-sys-color-primary);
 }
 
 /* ============================================================================
@@ -3401,4 +4122,123 @@ body.reduced-motion *::after {
     font-size: 20px;
   }
 }
+
+/* --- Accessibility: live region -------------------------------------------
+   One polite announcer for the whole app. Streamed output is far too chatty
+   to announce token by token, so callers speak only at milestones (a turn
+   starting, a command returning, an error). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Auth gate -----------------------------------------------------------
+   Shown when /api/* answers 401 and there is no credential to spend. Full
+   screen on purpose: until the token is entered, nothing behind it works. */
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(8px);
+  animation: m3-fade-in 180ms var(--md-motion-easing-decelerate);
+}
+.auth-gate-card {
+  width: min(420px, calc(100vw - 32px));
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  text-align: center;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--md-shape-xxl);
+  box-shadow: var(--md-sys-color-shadow);
+}
+.auth-gate-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary-container);
+}
+.auth-gate-title {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface);
+}
+.auth-gate-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.auth-gate-form {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+}
+.auth-gate-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  font-family: var(--font-family-code);
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface);
+  background: var(--md-sys-color-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-md);
+}
+.auth-gate-input:focus-visible {
+  border-color: var(--md-sys-color-primary);
+}
+.auth-gate-error {
+  margin: 0;
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--md-sys-color-error);
+}
+.auth-gate-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* --- Auth bypass banner --------------------------------------------------
+   Only rendered when the server was started with --no-auth. */
+.auth-bypass-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-error-container);
+  background: var(--md-sys-color-error-container);
+  border-bottom: 1px solid var(--md-sys-color-error);
+}
+
+.auth-banner-icon {
+  font-size: 16px;
+}
+.auth-banner-text {
+  line-height: 1.4;
+}
 `;
+
+

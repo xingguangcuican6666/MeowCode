@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { PICKER_MOTION_ON, PICKER_MOTION_OFF } from '../lib/termmodes'
 import { Box, Text, useInput, useStdin } from 'ink'
 import { useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 import { fmtTokens } from '../lib/usage'
 
 // One choice in the /autocompact picker. `off` disables auto-compaction, `auto`

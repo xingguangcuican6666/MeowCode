@@ -50,6 +50,18 @@ const frontendCode = `
   const sdk = window.MeowSDK;
   if (!sdk) return;
 
+  // A filename is untrusted input: it comes off the filesystem, so cloning a
+  // repo whose tree contains "<img src=x onerror=...>" would otherwise run
+  // script in the WebUI's origin — the one that holds the auth cookie. The SDK
+  // exposes the same escaper its own renderers use; fall back to a local copy so
+  // this plugin does not depend on that export existing.
+  const escapeHtml = sdk.escapeHtml || ((s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;'));
+
   sdk.panels.register({
     id: 'files',
     title: 'Files',
@@ -60,12 +72,12 @@ const frontendCode = `
       container.innerHTML = \`
         <div class="panel-files-view">
           <div class="panel-toolbar">
-            <input type="text" id="file-search" placeholder="\${t('plugins.files.filterPlaceholder', 'Filter files...')}" class="panel-input" />
-            <button id="file-refresh-btn" class="btn btn-sm btn-ghost" title="\${t('plugins.files.refresh', 'Refresh files')}">
+            <input type="text" id="file-search" placeholder="\${escapeHtml(t('plugins.files.filterPlaceholder', 'Filter files...'))}" class="panel-input" />
+            <button id="file-refresh-btn" class="btn btn-sm btn-ghost" title="\${escapeHtml(t('plugins.files.refresh', 'Refresh files'))}">
               <span class="material-symbols-outlined icon-sm">refresh</span>
             </button>
           </div>
-          <div id="file-tree" class="file-tree-container">\${t('plugins.files.loading', 'Loading files...')}</div>
+          <div id="file-tree" class="file-tree-container">\${escapeHtml(t('plugins.files.loading', 'Loading files...'))}</div>
           <div id="file-preview-area" class="file-preview-card" style="display:none;">
             <div class="file-preview-header">
               <span id="file-preview-title" class="file-preview-name"></span>
@@ -94,13 +106,13 @@ const frontendCode = `
       let cachedFiles = [];
 
       async function loadFiles() {
-        treeContainer.innerHTML = '<div class="muted-loading">' + t('plugins.files.loading', 'Loading workspace files...') + '</div>';
+        treeContainer.innerHTML = '<div class="muted-loading">' + escapeHtml(t('plugins.files.loading', 'Loading workspace files...')) + '</div>';
         try {
           const res = await sdk.api.callBackendPlugin('workspace-files', 'tree');
           cachedFiles = res.items || [];
           renderTree(cachedFiles);
         } catch (e) {
-          treeContainer.innerHTML = '<div class="text-error">Failed to load files: ' + e.message + '</div>';
+          treeContainer.innerHTML = '<div class="text-error">' + escapeHtml('Failed to load files: ' + e.message) + '</div>';
         }
       }
 
@@ -126,7 +138,7 @@ const frontendCode = `
           
           row.innerHTML = \`
             <span class="material-symbols-outlined file-icon icon-sm" style="color:var(--md-sys-color-primary);">\${iconName}</span>
-            <span class="file-path">\${file.path}</span>
+            <span class="file-path">\${escapeHtml(file.path)}</span>
             \${sizeStr ? '<span class="file-size">' + sizeStr + '</span>' : ''}
           \`;
 
@@ -196,14 +208,20 @@ export const workspaceFilesPlugin: WebUIPlugin = {
     read: (_req, _res, body, ctx) => {
       const relPath = String(body?.path || '')
       if (!relPath) throw new Error('Path required')
-      const target = path.resolve(ctx.cwd, relPath)
-      if (!target.startsWith(path.resolve(ctx.cwd))) {
+      const root = fs.realpathSync(ctx.cwd)
+      const target = path.resolve(root, relPath)
+      // Prefix-check the *resolved* path: a symlink inside the workspace pointing
+      // at ~/.ssh/id_rsa resolves outside and is rejected, where a check on the
+      // nominal path (what statSync sees) would wave it through. realpathSync
+      // also throws for a dangling link, which lands in the catch below.
+      const real = fs.realpathSync(target)
+      if (real !== root && !real.startsWith(root + path.sep)) {
         throw new Error('Access denied: path escapes workspace')
       }
-      const stat = fs.statSync(target)
+      const stat = fs.lstatSync(real)
       if (stat.isDirectory()) throw new Error('Target is a directory')
       if (stat.size > 2 * 1024 * 1024) throw new Error('File exceeds preview size limit (2MB)')
-      const content = fs.readFileSync(target, 'utf8')
+      const content = fs.readFileSync(real, 'utf8')
       return { path: relPath, size: stat.size, content }
     },
   },

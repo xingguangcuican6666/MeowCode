@@ -1,7 +1,24 @@
 import { getProvider } from '../providers'
+// `isCommand` is the TUI's own test for "this line is a slash command", imported
+// rather than re-implemented so the two queues cannot disagree about which lines
+// are commands. commands/index.ts reaches webui only through a *dynamic* import
+// (the /web command body), so this static edge is not a cycle.
+import { isCommand } from '../commands'
 import { runTool, toolSchemas, summarizeToolCall } from '../tools'
+import { decidePermission, isPermissionMode, matchPermissionRule, DENY_RULE_REASON } from '../tools/permission'
 import { newSessionId, saveSession, loadSession, listSessions, deleteSession, renameSession, type SessionMeta } from '../lib/sessions'
-import type { AgentEvent, AgentSnapshot, AppConfig, DiffLine, Message, SessionUsage, WorkflowSnapshot } from '../types'
+import type {
+  AgentEvent,
+  AgentSnapshot,
+  AppConfig,
+  Message,
+  PermissionRequest,
+  SessionUsage,
+  UserInputRequest,
+  UserInputResponse,
+  UserQuestion,
+  WorkflowSnapshot,
+} from '../types'
 import type { ToolContext } from '../tools/types'
 import { AGENT_SYSTEM, formatToolResult } from '../hooks/chat-helpers'
 import { standingPreamble } from '../lib/memory'
@@ -10,6 +27,8 @@ import { customAgentCatalog } from '../tools/orchestration'
 import { runHooks } from '../lib/hooks'
 import { getSetting, effortDirective, outputStyleDirective, workflowSizeDirective, resolveThinkingBudget } from '../lib/settings'
 import { emptyUsage } from '../lib/usage'
+import { estimateTokens } from '../lib/tokens'
+import { computeCost } from '../lib/pricing'
 import { changeSummary } from '../lib/transcript'
 import { startMcpServers, stopMcpServers } from '../lib/mcp'
 import { entryAwareSaveConfig } from '../lib/entries'
@@ -22,6 +41,37 @@ export interface AgentBridgeState {
   turnSeq: number
 }
 
+/**
+ * A question the running turn needs the browser to answer. The bridge has no UI of
+ * its own, so it hands these to whoever installed an interaction handler (the
+ * server, which pushes them over SSE and waits for the POST that answers them).
+ * This is the WebUI counterpart of the TUI's PermissionDialog / AskUserDialog.
+ */
+export type WebUIInteraction =
+  | { kind: 'permission'; id: string; tool: string; input: Record<string, unknown>; summary: string }
+  | { kind: 'userInput'; id: string; questions: UserQuestion[] }
+
+export type WebUIInteractionResponse =
+  | { decision: 'allow' | 'deny'; reason?: string }
+  | { answers: string[][]; cancelled?: boolean }
+
+export type WebUIInteractionHandler = ((
+  req: WebUIInteraction,
+) => Promise<WebUIInteractionResponse>) & WebUIInteractionObserver
+
+/**
+ * Told when a parked prompt stops being parked for reasons other than an answer:
+ * the turn timed it out, aborted it, or failed while waiting. A property on the
+ * handler (rather than a second argument) so every existing handler — including
+ * the ones tests install — stays a function of one argument.
+ */
+export type WebUIInteractionObserver = {
+  onSettled?: (id: string, reason: 'answered' | 'timeout' | 'aborted' | 'error') => void
+}
+
+// A prompt nobody answers must not wedge the turn: fall back to the safe answer.
+const INTERACTION_TIMEOUT_MS = 180_000
+
 export class AgentBridge {
   private config: AppConfig
   private cwd: string
@@ -32,6 +82,8 @@ export class AgentBridge {
   private hookCtx?: string
   private turnSeq = 0
   private controller: AbortController | null = null
+  // Set the moment a turn is admitted, before the first await — see runTurn.
+  private turnActive = false
 
   constructor(config: AppConfig, cwd: string = process.cwd()) {
     this.config = config
@@ -79,7 +131,10 @@ export class AgentBridge {
       sessionId: this.sessionId,
       messages: this.messages,
       usage: this.usage,
-      isRunning: this.controller !== null,
+      // The turn claim, not the controller: during the hook phase of a turn there
+      // is a real turn in progress but no controller yet, and the client's
+      // `isRunning` drives its send/stop button.
+      isRunning: this.turnActive,
       config: this.getConfig(),
     }
   }
@@ -147,6 +202,43 @@ export class AgentBridge {
     return await runTool(name, input, ctx)
   }
 
+  /**
+   * The permission layering the agent loop applies before every tool call in
+   * providers/anthropic.ts — persistent rules first, then the mode decision,
+   * then the interactive handshake — exposed for the HTTP tool route so the
+   * browser cannot reach a mutating tool by asking for it directly instead of
+   * letting the model ask. Same order, same helpers, one place to change.
+   */
+  public async authorizeToolCall(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<{ allow: true } | { allow: false; reason: string }> {
+    const mode = String(getSetting(this.config.settings, 'permissionMode') || 'default')
+    const permMode = isPermissionMode(mode) ? mode : 'default'
+    let decision = decidePermission(permMode, name, {
+      autoModeInPlan: getSetting(this.config.settings, 'autoModeInPlan') === true,
+    })
+    const rule = matchPermissionRule(name, input, this.config.permissions)
+    if (rule === 'deny') {
+      decision = { action: 'deny', reason: DENY_RULE_REASON }
+    } else if (rule === 'allow' && decision.action === 'ask') {
+      decision = { action: 'allow' }
+    } else if (rule === 'ask' && decision.action === 'allow' && permMode !== 'bypassPermissions') {
+      decision = { action: 'ask' }
+    }
+
+    if (decision.action === 'allow') return { allow: true }
+    if (decision.action === 'deny') return { allow: false, reason: decision.reason }
+
+    const verdict = await this.promptPermission({
+      tool: name,
+      input,
+      summary: summarizeToolCall(name, input),
+    })
+    if (verdict === 'allow') return { allow: true }
+    return { allow: false, reason: '用户拒绝了本次工具调用。' }
+  }
+
   public listTools(): any[] {
     return toolSchemas(true, this.config.settings?.dynamicWorkflows !== false, this.cwd)
   }
@@ -204,14 +296,172 @@ export class AgentBridge {
     })
   }
 
+  /**
+   * The bridge owns the mid-turn queues the agent loop drains via `takePending`
+   * and `takeEvents` (see StreamOpts). The browser submits a follow-up line while
+   * a turn is streaming through /api/turn → here → `pendingInput`; async events
+   * (monitor/schedule output, notices) arrive through `pushAsyncEvent`. Draining
+   * is the browser analogue of app.tsx's `queued` state — without it the WebUI
+   * turn always ends before a typed line reaches the model.
+   */
+  private pendingInput: string[] = []
+  private asyncEvents: string[] = []
+  private interactionSeq = 0
+  private interactionHandler: WebUIInteractionHandler | null = null
+
+  /** Installed by the server so a turn can ask the browser a question. */
+  public setInteractionHandler(handler: WebUIInteractionHandler | null): void {
+    this.interactionHandler = handler
+  }
+
+  private async ask(req: WebUIInteraction): Promise<WebUIInteractionResponse | null> {
+    if (!this.interactionHandler) return null
+    // An unanswered prompt must never wedge the turn forever — a closed browser
+    // tab would otherwise hang the agent until the process exits. Two escapes, not
+    // one: the timeout covers a tab that was closed without answering, and an abort
+    // covers the Abort button, which only aborts the provider's fetch — without the
+    // second race a user who hit Abort on a permission dialog sat there for the
+    // full 180s, because nothing the turn was awaiting had an abort signal.
+    //
+    // Both escapes are reported to the server as a *settlement*, so a prompt the
+    // turn has already walked away from is not left parked in its registry
+    // forever: the server keeps answered entries around for idempotent retries
+    // (see its /api/interaction/respond) and would otherwise keep re-broadcasting
+    // them to every tab on every poll, long after the turn that raised them ended.
+    const settle = (reason: 'answered' | 'timeout' | 'aborted' | 'error') =>
+      this.interactionHandler?.onSettled?.(req.id, reason)
+    // The abort arm only joins the race when there *is* a controller to abort. A
+    // direct /api/tools/call runs no turn, so `this.controller` is null and an
+    // always-settled abort arm would resolve the prompt before anybody could answer
+    // it — turning every parked permission into an instant deny.
+    const races: Promise<WebUIInteractionResponse | null>[] = [
+      this.interactionHandler(req).then((r) => {
+        settle('answered')
+        return r
+      }),
+      new Promise<null>((resolve) =>
+        setTimeout(() => {
+          settle('timeout')
+          resolve(null)
+        }, INTERACTION_TIMEOUT_MS),
+      ),
+    ]
+    const signal = this.controller?.signal
+    if (signal) {
+      races.push(
+        new Promise<null>((resolve) => {
+          const done = () => {
+            settle('aborted')
+            resolve(null)
+          }
+          if (signal.aborted) done()
+          else signal.addEventListener('abort', done, { once: true })
+        }),
+      )
+    }
+    try {
+      return (await Promise.race(races)) ?? null
+    } catch {
+      settle('error')
+      return null
+    }
+  }
+
+  private async promptPermission(req: PermissionRequest): Promise<'allow' | 'deny'> {
+    const res = await this.ask({
+      kind: 'permission',
+      id: `perm-${++this.interactionSeq}`,
+      tool: req.tool,
+      input: req.input,
+      summary: req.summary,
+    })
+    if (!res || !('decision' in res)) return 'deny'
+    return res.decision
+  }
+
+  private async promptUserInput(req: UserInputRequest): Promise<UserInputResponse> {
+    const res = await this.ask({
+      kind: 'userInput',
+      id: `ask-${++this.interactionSeq}`,
+      questions: req.questions,
+    })
+    if (!res || !('answers' in res)) return { answers: [], cancelled: true }
+    return { answers: res.answers, cancelled: res.cancelled }
+  }
+
+  /**
+   * Park a follow-up line for the running turn.
+   *
+   * What a human types into the prompt box while a turn streams is prose meant for
+   * the model mid-turn, so it goes straight into `pendingInput` — the same shape
+   * app.tsx's `send`/`takePending` pair uses, and the same reason a slash command
+   * is routed back out: a `/…` line is not prose, and feeding one to the model as
+   * text would run a command's words as an instruction instead of executing it.
+   * Returning false tells the caller it did not land here, so the route can do what
+   * the TUI's idle flush does and run it as its own turn.
+   */
+  public queuePending(text: string): boolean {
+    const line = text.trim()
+    if (!line) return false
+    if (isCommand(line)) return false
+    this.pendingInput.push(line)
+    return true
+  }
+
+  private takePending(): string[] {
+    return this.pendingInput.splice(0)
+  }
+
+  /**
+   * What is still queued after a turn ended.
+   *
+   * The provider drains `takePending` only after a *tool batch*, so a line typed
+   * while the model was streaming its final answer is still sitting in the queue
+   * when the turn returns — and nothing else would ever pick it up, which is how a
+   * typed line used to vanish. The TUI avoids this by flushing on Esc (app.tsx);
+   * the browser has the same hook, so the leftover is returned rather than dropped
+   * and the caller runs it as the next turn.
+   */
+  public drainPending(): string[] {
+    return this.takePending()
+  }
+
+  /** Append an async event line, exactly as lib/background would frame it for the TUI. */
+  public pushAsyncEvent(event: string): void {
+    this.asyncEvents.push(event)
+  }
+
+  private takeEvents(): string[] {
+    return this.asyncEvents.splice(0)
+  }
+
   public async runTurn(
     prompt: string,
     onEvent: (event: AgentEvent) => void,
   ): Promise<{ turn: number }> {
     const trimmed = prompt.trim()
     if (!trimmed) throw new Error('Prompt cannot be empty')
-    if (this.controller) throw new Error('A turn is already in progress')
+    // The old guard was `if (this.controller)`, which is a TOCTOU: this method
+    // awaits two hook runs before it creates the controller, so two /api/turn
+    // requests that arrive together both pass the check and both stream into the
+    // same message list — two turns interleaved into one transcript, with each
+    // one's tool calls racing the other's. Claim the turn *here*, before the
+    // first await, and hold it until the finally that releases it.
+    if (this.turnActive) throw new Error('A turn is already in progress')
+    this.turnActive = true
+    try {
+      return await this.runTurnAdmitted(trimmed, onEvent)
+    } finally {
+      // Every path out of the turn has to give the claim back, or the bridge
+      // refuses every turn for the life of the process.
+      this.turnActive = false
+    }
+  }
 
+  private async runTurnAdmitted(
+    trimmed: string,
+    onEvent: (event: AgentEvent) => void,
+  ): Promise<{ turn: number }> {
     if (this.hookCtx === undefined) {
       const ss = await runHooks('SessionStart', { source: 'startup' }, this.cwd)
       this.hookCtx = ss.context || ''
@@ -243,82 +493,37 @@ export class AgentBridge {
     const effortLevel = String(getSetting(cfg.settings, 'effort'))
     const thinkingMode = String(getSetting(cfg.settings, 'thinkingMode'))
     const assistantId = `a${turn}`
+    const system = this.buildSystem()
+    // Prompt-size estimate as the billing/context fallback for providers that
+    // report no usage (mock). Mirrors useChat's inputEstimate, minus the UI-only
+    // bits: this bridge keeps no banner or attachment in `messages`.
+    const inputEstimate =
+      estimateTokens(system) +
+      this.messages.reduce(
+        (n, m) =>
+          n +
+          (m.content === '__banner__' || m.meta?.folded || m.meta?.command
+            ? 0
+            : estimateTokens(m.content)) +
+          estimateTokens(m.meta?.injectedContext ?? '') +
+          (m.meta?.attachments?.length ?? 0) * 1600,
+        0,
+      )
 
     let acc = ''
     let thinkingAcc = ''
     let errorMsg = ''
     const turnStart = Date.now()
-    const t = { input: 0, output: 0 }
+    const t = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
+    let sawUsage = false
     const controller = new AbortController()
     this.controller = controller
 
-    const isStubDefault = (provider.id === 'default' && !process.env.ANTHROPIC_API_KEY && !cfg.apiKey) || provider.id === 'mock'
-
     try {
-      if (isStubDefault) {
-        for await (const ev of this.simulateOfflineTurn(trimmed, controller.signal)) {
-          if (ev.type === 'thinking') {
-            thinkingAcc += ev.text
-          } else if (ev.type === 'text') {
-            acc += ev.text
-          } else if (ev.type === 'tool_use') {
-            if (thinkingAcc.trim()) {
-              this.messages = [
-                ...this.messages,
-                { id: `${assistantId}-t`, role: 'assistant', content: thinkingAcc, meta: { thinking: true } },
-              ]
-              thinkingAcc = ''
-            }
-            if (acc.trim()) {
-              this.messages = [...this.messages, { id: assistantId, role: 'assistant', content: acc }]
-              acc = ''
-            }
-            this.usage.toolCalls++
-            this.messages = [
-              ...this.messages,
-              {
-                id: ev.id,
-                role: 'tool',
-                content: `● ${summarizeToolCall(ev.name, ev.input)}`,
-                meta: { toolName: ev.name, toolInput: ev.input },
-              },
-            ]
-          } else if (ev.type === 'tool_result') {
-            if (ev.linesAdded) this.usage.linesAdded += ev.linesAdded
-            if (ev.linesRemoved) this.usage.linesRemoved += ev.linesRemoved
-            this.messages = [
-              ...this.messages,
-              ev.diff?.length && !ev.isError
-                ? {
-                    id: `${ev.id}-r`,
-                    role: 'tool',
-                    content: `⎿ ${changeSummary(ev.linesAdded ?? 0, ev.linesRemoved ?? 0)}`,
-                    meta: { diff: ev.diff, toolName: ev.name, toolContent: ev.content, toolDisplay: ev.display },
-                  }
-                : {
-                    id: `${ev.id}-r`,
-                    role: 'tool',
-                    content: formatToolResult(ev.display ?? ev.content, ev.isError),
-                    meta: {
-                      ...(ev.isError ? { error: true } : {}),
-                      toolName: ev.name,
-                      toolContent: ev.content,
-                      toolDisplay: ev.display,
-                    },
-                  },
-            ]
-          } else if (ev.type === 'usage') {
-            t.input += ev.inputTokens
-            t.output += ev.outputTokens
-          } else if (ev.type === 'error') {
-            errorMsg = ev.message
-          }
-          onEvent(ev)
-        }
-      } else if (!provider.agent) {
+      if (!provider.agent) {
         for await (const chunk of provider.stream(this.messages, {
           model: cfg.model,
-          system: this.buildSystem(),
+          system,
           signal: controller.signal,
         })) {
           acc += chunk
@@ -327,7 +532,7 @@ export class AgentBridge {
       } else {
         for await (const ev of provider.agent(this.messages, {
           model: cfg.model,
-          system: this.buildSystem(),
+          system,
           signal: controller.signal,
           thinkingBudget: resolveThinkingBudget(effortLevel, thinkingMode),
           retryStatusCodes: String(getSetting(cfg.settings, 'retryStatusCodes')),
@@ -338,8 +543,13 @@ export class AgentBridge {
           dynamicWorkflows: getSetting(cfg.settings, 'dynamicWorkflows') !== false,
           artifacts: getSetting(cfg.settings, 'artifacts') !== false,
           rewind: getSetting(cfg.settings, 'rewindCode') !== false,
-          permissionMode: 'bypassPermissions',
+          permissionMode: String(getSetting(cfg.settings, 'permissionMode') || 'default'),
+          autoModeInPlan: getSetting(cfg.settings, 'autoModeInPlan') === true,
           permissionRules: cfg.permissions,
+          takePending: () => this.takePending(),
+          takeEvents: () => this.takeEvents(),
+          requestPermission: (req) => this.promptPermission(req),
+          requestUserInput: (req) => this.promptUserInput(req),
           onPermissionModeChange: (mode: string) => {
             this.config = { ...this.config, settings: { ...(this.config.settings ?? {}), permissionMode: mode } }
             entryAwareSaveConfig(this.config)
@@ -398,8 +608,11 @@ export class AgentBridge {
                   },
             ]
           } else if (ev.type === 'usage') {
+            sawUsage = true
             t.input += ev.inputTokens
             t.output += ev.outputTokens
+            t.cacheRead += ev.cacheReadTokens ?? 0
+            t.cacheCreation += ev.cacheCreationTokens ?? 0
           } else if (ev.type === 'error') {
             errorMsg = ev.message
           }
@@ -433,463 +646,29 @@ export class AgentBridge {
       this.messages = [...this.messages, { id: `e${turn}`, role: 'system', content: `⚠ ${errorMsg}`, meta: { error: true } }]
     }
 
+    // Fold this turn into the totals, same policy as useChat: the provider's real
+    // counts (incl. cache) win, estimates fill in when it reported none (mock),
+    // and cost is always computed at official rates whatever provider.
+    const inTok = sawUsage ? t.input : inputEstimate
+    const outTok = sawUsage ? t.output : estimateTokens(acc)
+    const turnCost = computeCost(
+      {
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cacheReadTokens: t.cacheRead,
+        cacheCreationTokens: t.cacheCreation,
+      },
+      cfg.model,
+    )
     this.usage.turns++
-    this.usage.inputTokens += t.input
-    this.usage.outputTokens += t.output
+    this.usage.inputTokens += inTok
+    this.usage.outputTokens += outTok
+    this.usage.cacheReadTokens += t.cacheRead
+    this.usage.cacheCreationTokens += t.cacheCreation
     this.usage.apiMs += Date.now() - turnStart
+    this.usage.costUsd += turnCost
     this.scheduleSave()
 
     return { turn }
   }
-
-  private async *simulateOfflineTurn(
-    prompt: string,
-    signal: AbortSignal,
-  ): AsyncGenerator<AgentEvent, void, unknown> {
-    const sleep = (ms: number) =>
-      new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve()
-        const t = setTimeout(resolve, ms)
-        signal.addEventListener('abort', () => { clearTimeout(t); resolve() }, { once: true })
-      })
-
-    const streamTokens = async function* (
-      text: string,
-      type: 'text' | 'thinking',
-    ): AsyncGenerator<AgentEvent, void, unknown> {
-      const tokens = text.match(/\s+|\S+/g) ?? [text]
-      for (let i = 0; i < tokens.length; i++) {
-        if (signal.aborted) return
-        yield { type, text: tokens[i] }
-        if (i < tokens.length - 1) await sleep(10 + Math.random() * 15)
-      }
-    }
-
-    const trimmed = prompt.trim()
-    const lower = trimmed.toLowerCase()
-
-    // 0. Todo / Task checklist trigger: todo: <task1, task2> or checklist: or "todo" / "任务清单"
-    const todoMatch =
-      /^(?:todo|todos|checklist|任务|待办):\s*([\s\S]*)/i.exec(trimmed) ||
-      (lower === 'todo' || lower === 'checklist' || lower === 'todos' || lower.includes('todo list') || lower.includes('任务清单')
-        ? [trimmed, '']
-        : null)
-    if (todoMatch) {
-      const taskSpec = todoMatch[1]?.trim() || ''
-      const items = taskSpec
-        ? taskSpec.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean)
-        : [
-            'Inspect workspace architecture and tool registry',
-            'Implement M3E tool call cards for todo_write',
-            'Connect mock provider triggers & event stream',
-            'Verify responsive layout & automated tests',
-          ]
-
-      yield* streamTokens(`Initializing task checklist with \`todo_write\`...`, 'thinking')
-      if (signal.aborted) return
-
-      // Step 1: Initial state (1st task in progress, others pending)
-      const t1Id = `t_todo_${Date.now()}`
-      const initialTodos = items.map((content, idx) => ({
-        content,
-        status: (idx === 0 ? 'in_progress' : 'pending') as 'in_progress' | 'pending',
-        activeForm: idx === 0 ? `Working on: ${content}` : undefined,
-      }))
-      yield { type: 'tool_use', id: t1Id, name: 'todo_write', input: { todos: initialTodos } }
-      await sleep(700)
-      yield {
-        type: 'tool_result',
-        id: t1Id,
-        name: 'todo_write',
-        content: `Created task checklist with ${items.length} tasks (1 in progress, ${items.length - 1} pending).`,
-      }
-      await sleep(600)
-      if (signal.aborted) return
-
-      // Step 2: Progress first task to completed, second to in_progress
-      yield* streamTokens(`Initial task complete. Advancing to next milestone...`, 'thinking')
-      if (signal.aborted) return
-
-      const t2Id = `t_todo_${Date.now() + 1}`
-      const progressedTodos = items.map((content, idx) => ({
-        content,
-        status: (idx === 0 ? 'completed' : (idx === 1 ? 'in_progress' : 'pending')) as 'completed' | 'in_progress' | 'pending',
-        activeForm: idx === 1 ? `Working on: ${content}` : undefined,
-      }))
-      yield { type: 'tool_use', id: t2Id, name: 'todo_write', input: { todos: progressedTodos } }
-      await sleep(700)
-      yield {
-        type: 'tool_result',
-        id: t2Id,
-        name: 'todo_write',
-        content: `Updated task checklist (1 completed, 1 in progress, ${Math.max(0, items.length - 2)} pending).`,
-      }
-      await sleep(500)
-      if (signal.aborted) return
-
-      // Step 3: Complete remaining tasks
-      const t3Id = `t_todo_${Date.now() + 2}`
-      const allDoneTodos = items.map((content) => ({
-        content,
-        status: 'completed' as const,
-      }))
-      yield { type: 'tool_use', id: t3Id, name: 'todo_write', input: { todos: allDoneTodos } }
-      await sleep(500)
-      yield {
-        type: 'tool_result',
-        id: t3Id,
-        name: 'todo_write',
-        content: `All ${items.length} tasks marked as completed.`,
-      }
-      await sleep(400)
-      if (signal.aborted) return
-
-      const doneText = [
-        `### Task Checklist Successfully Executed`,
-        '',
-        `All **${items.length} tasks** have been processed through the \`todo_write\` tool:`,
-        items.map((it) => `- ✓ **${it}**`).join('\n'),
-        '',
-        `The task list card above reflects real-time status transitions (\`pending\` → \`in_progress\` → \`completed\`).`,
-      ].join('\n')
-
-      yield* streamTokens(doneText, 'text')
-      yield { type: 'usage', inputTokens: 680, outputTokens: 290, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // Direct search: search: <query> or web: <query>
-    const searchMatch = /^(?:search|web):\s*(.+)/i.exec(trimmed)
-    if (searchMatch) {
-      const query = searchMatch[1].trim()
-      yield* streamTokens(`Searching web documentation for "${query}"...`, 'thinking')
-      if (signal.aborted) return
-      const id = `t_search_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'web_search', input: { query } }
-      await sleep(500)
-      const res = `1. Material Design 3 Guidelines (https://m3.material.io)\n2. Material Expressive Motion & Container Shapes\n3. Web Components Local Custom Elements Spec`
-      yield { type: 'tool_result', id, name: 'web_search', content: res }
-      await sleep(300)
-      yield* streamTokens(`Search completed for "${query}". Found 3 relevant references.`, 'text')
-      yield { type: 'usage', inputTokens: 420, outputTokens: 160, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // Direct ask: ask: <question>
-    const askMatch = /^ask:\s*(.+)/i.exec(trimmed)
-    if (askMatch) {
-      const question = askMatch[1].trim()
-      yield* streamTokens(`Asking user for input on "${question}"...`, 'thinking')
-      if (signal.aborted) return
-      const id = `t_ask_${Date.now()}`
-      yield {
-        type: 'tool_use',
-        id,
-        name: 'ask_user',
-        input: {
-          questions: [
-            {
-              question,
-              options: [
-                { label: 'Option A: Automatic execution', description: 'Run all steps sequentially without pauses' },
-                { label: 'Option B: Step-by-step confirmation', description: 'Prompt before modifying any file' },
-              ],
-            },
-          ],
-        },
-      }
-      await sleep(600)
-      yield { type: 'tool_result', id, name: 'ask_user', content: 'User selected Option A: Automatic execution' }
-      await sleep(300)
-      yield* streamTokens(`Received user response. Proceeding with Option A: Automatic execution.`, 'text')
-      yield { type: 'usage', inputTokens: 400, outputTokens: 150, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // 1. Direct tool shortcuts: run: <cmd>, read: <path>, ls: <path>
-    const runMatch = /^(\/run|run:|\$)\s*([\s\S]+)/i.exec(trimmed)
-    if (runMatch) {
-      const cmd = runMatch[2].trim()
-      yield* streamTokens(`Executing terminal command via \`bash\` tool: \`${cmd}\`...`, 'thinking')
-      if (signal.aborted) return
-      const id = `t_bash_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'bash', input: { command: cmd } }
-      await sleep(350)
-      let output = ''
-      let isError = false
-      try {
-        const res = await this.runTool('bash', { command: cmd })
-        output = res.content || res.display || '(no output)'
-        isError = Boolean(res.isError)
-      } catch (err: any) {
-        output = err.message || String(err)
-        isError = true
-      }
-      yield { type: 'tool_result', id, name: 'bash', content: output, isError }
-      await sleep(200)
-      yield* streamTokens(`Command finished with exit code ${isError ? '1 (FAILED)' : '0 (OK)'}.`, 'text')
-      yield { type: 'usage', inputTokens: 450, outputTokens: 180, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    const readMatch = /^(\/read|read:)\s*([^\s]+)/i.exec(trimmed)
-    if (readMatch) {
-      const filePath = readMatch[2].trim()
-      yield* streamTokens(`Locating and reading workspace file \`${filePath}\`...`, 'thinking')
-      if (signal.aborted) return
-      const id = `t_read_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'read_file', input: { path: filePath } }
-      await sleep(300)
-      let content = ''
-      let isError = false
-      try {
-        const res = await this.runTool('read_file', { path: filePath })
-        content = res.content || ''
-        isError = Boolean(res.isError)
-      } catch (err: any) {
-        content = err.message || String(err)
-        isError = true
-      }
-      yield { type: 'tool_result', id, name: 'read_file', content, isError }
-      await sleep(200)
-      yield* streamTokens(`Loaded ${filePath} successfully (${content.split('\n').length} lines).`, 'text')
-      yield { type: 'usage', inputTokens: 520, outputTokens: 210, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    const lsMatch = /^(\/ls|ls:)\s*(.*)/i.exec(trimmed)
-    if (lsMatch) {
-      const dirPath = lsMatch[2].trim() || '.'
-      yield* streamTokens(`Listing workspace directory \`${dirPath}\`...`, 'thinking')
-      if (signal.aborted) return
-      const id = `t_ls_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'list_dir', input: { path: dirPath } }
-      await sleep(300)
-      let content = ''
-      let isError = false
-      try {
-        const res = await this.runTool('list_dir', { path: dirPath })
-        content = res.content || ''
-        isError = Boolean(res.isError)
-      } catch (err: any) {
-        content = err.message || String(err)
-        isError = true
-      }
-      yield { type: 'tool_result', id, name: 'list_dir', content, isError }
-      await sleep(200)
-      yield* streamTokens(`Listed directory \`${dirPath}\`.`, 'text')
-      yield { type: 'usage', inputTokens: 400, outputTokens: 150, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // 2. Test execution prompt
-    if (lower.includes('test') || lower.includes('vitest') || lower.includes('check') || lower.includes('health')) {
-      const thinking = [
-        '1. Detecting workspace test suites in test/ and src/webui/...',
-        '2. Formulating test command execution with bun/vitest...',
-        '3. Inspecting test assertions, unit tests, and plugin hooks...',
-        '4. Verifying harness integrity and reporting results...',
-      ].join('\n')
-      yield* streamTokens(thinking, 'thinking')
-      if (signal.aborted) return
-
-      const id = `t_test_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'bash', input: { command: 'bun run test' } }
-      await sleep(600)
-
-      const testOutput = [
-        '✓ src/webui/webui.test.ts (11 tests) 38ms',
-        '✓ test/tools.test.ts (24 tests) 52ms',
-        '✓ test/agent.test.ts (18 tests) 44ms',
-        '✓ test/config.test.ts (16 tests) 28ms',
-        '✓ test/providers.test.ts (15 tests) 31ms',
-        '✓ test/permissions.test.ts (20 tests) 35ms',
-        '✓ test/sessions.test.ts (19 tests) 33ms',
-        '✓ test/mcp.test.ts (14 tests) 27ms',
-        '✓ test/hooks.test.ts (22 tests) 41ms',
-        '',
-        'Test Files  9 passed (9)',
-        '     Tests  159 passed (159)',
-        '  Duration  480ms',
-        'All 9 test suites passed. Zero failures.',
-      ].join('\n')
-
-      yield { type: 'tool_result', id, name: 'bash', content: testOutput, isError: false }
-      await sleep(350)
-
-      const reply = [
-        '### Test Suite Execution Succeeded',
-        '',
-        'All **159 automated tests** across 9 test suites passed with **100% pass rate** in 480ms:',
-        '- **Harness & WebUI**: 11 passed (clean slots, SSE routes, M3 components)',
-        '- **Tools & Orchestrator**: 24 passed (`bash`, `read_file`, `edit_file`, subagent)',
-        '- **Agent Loop & Permissions**: 38 passed (guardrails, session state)',
-        '- **Integrations & MCP**: 86 passed (config, credentials, hooks)',
-        '',
-        'Harness integrity is fully verified and green!',
-      ].join('\n')
-
-      yield* streamTokens(reply, 'text')
-      yield { type: 'usage', inputTokens: 980, outputTokens: 420, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // 3. Refactor / Cache / Edit code
-    if (lower.includes('refactor') || lower.includes('cache') || lower.includes('optimize') || lower.includes('clean')) {
-      const thinking = [
-        '1. Locating target modules for refactoring (cache & session layers)...',
-        '2. Abstracting in-memory map to generic LRU cache with TTL invalidation...',
-        '3. Generating atomic diff chunk for src/lib/cache.ts...',
-        '4. Validating concurrency safety and TypeScript strict typing...',
-      ].join('\n')
-      yield* streamTokens(thinking, 'thinking')
-      if (signal.aborted) return
-
-      const id = `t_refactor_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'edit_file', input: { path: 'src/lib/cache.ts' } }
-      await sleep(550)
-
-      const diff: DiffLine[] = [
-        { tag: 'context', text: 'export class MemoryStore<K, V> {' },
-        { tag: 'del', text: '  private store = new Map<K, V>()' },
-        { tag: 'add', text: '  private store = new Map<K, { value: V; expiresAt: number }>()' },
-        { tag: 'add', text: '  private readonly defaultTtl: number' },
-        { tag: 'context', text: '  constructor(ttlMs = 60_000) {' },
-        { tag: 'add', text: '    this.defaultTtl = ttlMs' },
-        { tag: 'context', text: '  }' },
-        { tag: 'context', text: '  get(key: K): V | undefined {' },
-        { tag: 'add', text: '    const entry = this.store.get(key)' },
-        { tag: 'add', text: '    if (!entry) return undefined' },
-        { tag: 'add', text: '    if (Date.now() > entry.expiresAt) { this.store.delete(key); return undefined; }' },
-        { tag: 'del', text: '    return this.store.get(key)' },
-        { tag: 'add', text: '    return entry.value' },
-        { tag: 'context', text: '  }' },
-      ]
-
-      yield {
-        type: 'tool_result',
-        id,
-        name: 'edit_file',
-        content: 'edited src/lib/cache.ts (6 additions, 2 deletions)',
-        diff,
-        linesAdded: 6,
-        linesRemoved: 2,
-        isError: false,
-      }
-      await sleep(350)
-
-      const reply = [
-        '### ✨ Refactoring Proposal Complete',
-        '',
-        'I have refactored the caching subsystem into a generic, type-safe **TTL LRU Cache**:',
-        '- **Automatic Stale Eviction**: Keys past `expiresAt` are invalidated automatically on access.',
-        '- **Generic Typing**: Supports arbitrary keys and values with zero runtime casting.',
-        '',
-        '```typescript',
-        "import { MemoryStore } from './lib/cache'",
-        '',
-        '// Initialize cache with 5-minute TTL',
-        'const cache = new MemoryStore<string, SessionData>(300_000)',
-        "cache.set('session-1', { userId: 'alice', active: true })",
-        '```',
-        '',
-        'Diff patch is verified and ready.',
-      ].join('\n')
-
-      yield* streamTokens(reply, 'text')
-      yield { type: 'usage', inputTokens: 1120, outputTokens: 510, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // 4. Explain / Architecture / Document
-    if (lower.includes('explain') || lower.includes('architecture') || lower.includes('document') || lower.includes('how')) {
-      const thinking = [
-        '1. Reading project structure and inspecting package.json...',
-        '2. Mapping out core layers: CLI harness, Provider abstraction, Tool registry, WebUI M3E studio...',
-        '3. Synthesizing structural architecture overview...',
-      ].join('\n')
-      yield* streamTokens(thinking, 'thinking')
-      if (signal.aborted) return
-
-      const id = `t_explain_${Date.now()}`
-      yield { type: 'tool_use', id, name: 'read_file', input: { path: 'package.json' } }
-      await sleep(400)
-
-      let pkgContent = ''
-      try {
-        const res = await this.runTool('read_file', { path: 'package.json' })
-        pkgContent = res.content || ''
-      } catch {
-        pkgContent = '{\n  "name": "meowcode",\n  "version": "1.0.0"\n}'
-      }
-
-      yield { type: 'tool_result', id, name: 'read_file', content: pkgContent.slice(0, 500) + '...', isError: false }
-      await sleep(300)
-
-      const reply = [
-        '### 🐾 MeowCode Architecture & Design Overview',
-        '',
-        'MeowCode is structured into clean, decoupled layers:',
-        '',
-        '1. **Core Harness & Orchestration** (`src/agent.ts`, `src/hooks/`)',
-        '   - Autonomous perception-reasoning-action loop coordinating model prompts, permission enforcement, and self-healing tool execution.',
-        '',
-        '2. **Tool Ecosystem** (`src/tools/`)',
-        '   - `bash`: Interactive command execution.',
-        '   - `read_file`, `edit_file`, `write_file`: Safe code inspection and editing.',
-        '   - `list_dir`, `grep`: Fast workspace indexing.',
-        '',
-        '3. **Material 3 Expressive WebUI** (`src/webui/`)',
-        '   - Built-in studio with Google Material 3 Expressive (M3E) aesthetics.',
-        '   - Dark/Light dynamic surface containers (`surface-container-lowest` through `highest`).',
-        '   - Zero-dependency local `@material/web` custom elements.',
-        '',
-        '4. **Extension SDK** (`window.MeowSDK`)',
-        '   - Extension slots (`header:*`, `sidebar:*`, `chat:*`, `statusbar:*`).',
-        '   - Custom panel registration and tool visualizers.',
-      ].join('\n')
-
-      yield* streamTokens(reply, 'text')
-      yield { type: 'usage', inputTokens: 1350, outputTokens: 640, cacheReadTokens: 0, cacheCreationTokens: 0 }
-      return
-    }
-
-    // 5. General query / conversation
-    const thinking = `Analyzing user request: "${trimmed.slice(0, 60)}". Formulating structured plan, verifying tool availability, and generating response...`
-    yield* streamTokens(thinking, 'thinking')
-    if (signal.aborted) return
-
-    const reply = [
-      `### MeowCode Assistant`,
-      '',
-      `I received your request:`,
-      `> ${trimmed.replace(/\n/g, '\n> ')}`,
-      '',
-      `Here is what you can do in this interactive studio:`,
-      `- **Task Checklist**: Type \`todo: task1, task2\` to exercise the **todo_write** M3E card.`,
-      `- **Run Tests**: Click **Run Tests** or type \`/test\` to execute repository test diagnostics.`,
-      `- **Explore Files**: Click **Files** tab or **@ File** chip to inspect and reference project files.`,
-      `- **Inspect Tools**: Click **Tools** tab to view schemas and test tool execution.`,
-      `- **Web Search**: Type \`search: query\` to test the **web_search** card.`,
-      `- **Ask User**: Type \`ask: question\` to test the **ask_user** decision card.`,
-      `- **Code Refactoring**: Request refactorings with live unified diff review.`,
-      `- **Terminal Execution**: Type \`run: ls -la\` or \`run: bun run build\` to execute real terminal commands.`,
-      '',
-      '```typescript',
-      '// Pair programming with MeowCode SDK',
-      "window.MeowSDK.slots.register('chat:toolbar', {",
-      "  id: 'custom-action',",
-      '  render: (container) => {',
-      "    console.log('Slot mounted successfully!');",
-      '  }',
-      '});',
-      '```',
-      '',
-      'All controls, dialogs, and tools are interactive and ready for experimentation!',
-    ].join('\n')
-
-    yield* streamTokens(reply, 'text')
-    yield { type: 'usage', inputTokens: 820, outputTokens: 380, cacheReadTokens: 0, cacheCreationTokens: 0 }
-  }
 }
-

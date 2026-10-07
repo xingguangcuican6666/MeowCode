@@ -3,7 +3,7 @@ import { Box, Text } from 'ink'
 import { symbols, useTheme } from '../theme'
 import { starFrames } from '../lib/spinner'
 import { formatTokens } from '../lib/tokens'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 interface Props {
   word: string

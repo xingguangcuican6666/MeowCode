@@ -31,7 +31,8 @@ import { CONFIG_DIR, offerLegacyMigration, reportMergeOutcome, type LegacyDirInf
 import { LegacyDirDialog, type LegacyChoice } from './components/LegacyDirDialog'
 import { getTheme, ThemeProvider } from './theme'
 import { getSetting } from './lib/settings'
-import { LangProvider, resolveLang, setLang } from './lib/i18n'
+import { resolveLang, setLang } from './lib/i18n'
+import { LangProvider } from './hooks/useT'
 
 const argv = process.argv.slice(2)
 
@@ -78,6 +79,8 @@ Options:
       --port <number>    Port for the WebUI (default: 4040)
       --host <host>      Host for the WebUI (default: 127.0.0.1)
       --no-open          Do not automatically open the browser in web mode
+      --no-auth          WebUI: skip the token check (deliberate exposure; anyone
+                        who reaches the port can drive the agent)
       --model <id>       Model to use for this run
       --provider <id>    Provider to use (mock | anthropic)
       --entry <name>      Start the named entry (a front-end of its own)
@@ -401,6 +404,7 @@ async function main(): Promise<void> {
     const port = portVal ? parseInt(portVal, 10) : 4040
     const host = hostVal || '127.0.0.1'
     const openBrowser = !has('--no-open')
+    const noAuth = has('--no-auth')
     const config = loadConfig()
     const model = flagValue('--model')
     if (model) config.model = model
@@ -409,8 +413,10 @@ async function main(): Promise<void> {
 
     process.stdout.write('Starting MeowCode Built-in WebUI...\n')
     const { startWebUI } = await import('./webui')
-    const instance = await startWebUI({ port, host, openBrowser, config })
-    process.stdout.write(`\n🐾 MeowCode WebUI listening at: ${instance.url}\n`)
+    // cwd: every tool the agent runs in the browser resolves against this, so it
+    // must be the directory the user launched from — not a later default.
+    const instance = await startWebUI({ port, host, openBrowser, noAuth, config, cwd: process.cwd() })
+    process.stdout.write(`\n🐾 MeowCode WebUI listening at: ${instance.baseUrl}\n`)
     process.stdout.write(`• Extension slots active: header, sidebar, chat, message, panels, statusbar\n`)
     process.stdout.write(`• Browser SDK: window.MeowSDK\n`)
     process.stdout.write(`• Built-in showcase plugins: Workspace Files, Tools Inspector, Prompt Templates, Metrics Monitor\n`)

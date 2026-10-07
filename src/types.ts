@@ -449,6 +449,18 @@ export interface CommandContext {
   openEditor?: (text: string) => void
 }
 
+/**
+ * The members of CommandContext that are answers rather than actions — a compact
+ * count, a picker to open — as opposed to the overlays a command drives and a
+ * browser cannot host. The WebUI command probe knows the browser's context, and
+ * this is the list it has to read as undefined (the TUI's non-interactive path,
+ * and print mode's) rather than as a callable: the commands that test them with
+ * `if (!ctx.compact)` take the terminal-only branch when the answer is falsy, so a
+ * probe that hands them a truthy stub would report a browser-runnable row that
+ * prints "terminal only" when run.
+ */
+export const COMMAND_CONTEXT_VALUE_MEMBERS = ['compact', 'openThemePicker', 'openModelPicker'] as const
+
 export interface SlashCommand {
   name: string
   aliases?: string[]

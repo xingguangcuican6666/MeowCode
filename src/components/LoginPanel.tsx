@@ -6,7 +6,7 @@ import { login, submit2FA, fetchRelayKey, normalizeBase, resolveNewapiBase } fro
 import { loginWithOAuth, resolveOAuthClientId } from '../lib/oauth'
 import { copyToClipboard } from '../lib/clipboard'
 import { saveCredentials, loadCredentials, type PanelSession, type OAuthSession } from '../lib/credentials'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 // Interactive /login overlay. Keeps credentials out of the chat transcript: the
 // key/password are typed here (masked) and written straight to

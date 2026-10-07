@@ -8,7 +8,8 @@ import { providerIds } from '../providers'
 import { DEFAULT_THEME } from '../theme'
 import { VERSION, NAME } from '../version'
 import { displayWidth, fitToWidth } from '../lib/text'
-import { useT, useLang, settingLabel, settingDesc, type Lang, type MessageKey } from '../lib/i18n'
+import { settingLabel, settingDesc, type Lang, type MessageKey } from '../lib/i18n'
+import { useT, useLang } from '../hooks/useT'
 import {
   SETTINGS, type SettingSpec, getSetting, coerceSetting, settingHint,
 } from '../lib/settings'
@@ -88,7 +89,17 @@ function coreRows(config: AppConfig, t: Tr): Row[] {
 // are localized (zh from the i18n table, falling back to the spec's English).
 function rowsForTab(tab: PanelTab, config: AppConfig, t: Tr, lang: Lang): Row[] {
   if (tab === 'config' || tab === 'settings') {
-    return [...coreRows(config, t), ...SETTINGS.map((s) => ({ kind: 'setting' as const, key: s.key, label: settingLabel(lang, s.key, s.label), spec: s }))]
+    return [
+      ...coreRows(config, t),
+      // surfaces:['web'] rows are browser-only (chat width, speech, …); a
+      // terminal has nothing to apply them to, so they stay out of this tab.
+      ...SETTINGS.filter((s) => !s.surfaces?.includes('web')).map((s) => ({
+        kind: 'setting' as const,
+        key: s.key,
+        label: settingLabel(lang, s.key, s.label),
+        spec: s,
+      })),
+    ]
   }
   return []
 }

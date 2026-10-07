@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import type { WorkflowAgent, WorkflowSnapshot } from '../types'
 import { useTheme, type ThemeColors } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 // One-line summary of a running `workflow` tool call, shown in the live region
 // so the user always sees progress (the "啥都看不见" fix). Press ↓ to expand it

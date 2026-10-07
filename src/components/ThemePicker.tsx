@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { PICKER_MOTION_ON, PICKER_MOTION_OFF } from '../lib/termmodes'
 import { Box, Text, useInput, useStdin } from 'ink'
 import { themeList, getTheme, AUTO_THEME, useTheme, type ThemeColors } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 interface Option { name: string; title: string }
 

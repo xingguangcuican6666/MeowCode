@@ -2,7 +2,7 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import type { AgentSnapshot } from '../types'
 import { useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 // The bottom agent switcher: one row for `main` plus one per switchable sub-agent
 // (`task`/`plan`). This is the conceptual centerpiece that distinguishes a

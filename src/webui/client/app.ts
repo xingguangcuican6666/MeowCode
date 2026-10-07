@@ -14,6 +14,7 @@ export const CLIENT_APP_JS = `/**
   const promptInput = document.querySelector('#prompt-input');
   const sendBtn = document.querySelector('#send-btn');
   const abortBtn = document.querySelector('#abort-btn');
+  const queueBtn = document.querySelector('#queue-btn');
   const newSessionBtn = document.querySelector('#new-session-btn');
   const sidebarSessionList = document.querySelector('#sidebar-session-list');
   const toggleSidebarBtn = document.querySelector('#toggle-sidebar-btn');
@@ -45,11 +46,20 @@ export const CLIENT_APP_JS = `/**
   let currentSessionId = '';
   let messages = [];
   let isRunning = false;
+  // Which side panel the layout is actually showing. The DOM is the source of
+  // truth (chatView / customPanelView), and this mirrors it so a panel switch
+  // triggered from outside — a plugin calling sdk.panels.setActivePanel(), or a
+  // command's openPanel callback — is distinguishable from one this file
+  // started. Without it, switchPanel() -> setActivePanel() -> panel:active ->
+  // switchPanel() recurses until the stack gives out.
+  let currentPanelId = 'chat';
   let activeTurnAssistantEl = null;
+  let activeTurnAssistantMessage = null;
   let activeTurnThinkingBody = null;
   let activeTurnThinkingCard = null;
   let currentToolCards = new Map();
   let appConfig = {};
+  let seenSubagents = [];
   let currentUsage = { inputTokens: 0, outputTokens: 0, toolCalls: 0, turns: 0 };
   let slotCleanups = [];
 
@@ -101,6 +111,7 @@ export const CLIENT_APP_JS = `/**
 
   sendBtn.addEventListener('click', handleSend);
   abortBtn.addEventListener('click', handleAbort);
+  if (queueBtn) queueBtn.addEventListener('click', handleSend);
   newSessionBtn.addEventListener('click', handleNewSession);
   if (brandHomeBtn) brandHomeBtn.onclick = () => switchPanel('chat');
 
@@ -128,6 +139,10 @@ export const CLIENT_APP_JS = `/**
       btn.classList.toggle('active', btn.getAttribute('data-tab') === panelId);
     });
 
+    // Set before setActivePanel: the panel:active handler below ignores an event
+    // for the panel already showing, and this call is about to emit one.
+    currentPanelId = panelId;
+
     if (panelId === 'chat') {
       chatView.style.display = 'flex';
       customPanelView.style.display = 'none';
@@ -143,7 +158,7 @@ export const CLIENT_APP_JS = `/**
       if (panel) {
         panel.render(customPanelView, { sdk, container: customPanelView });
       } else {
-        customPanelView.innerHTML = '<div class="empty-state">Panel ' + panelId + ' not found</div>';
+        customPanelView.innerHTML = '<div class="empty-state">Panel ' + escapeHtml(panelId) + ' not found</div>';
       }
     }
   }
@@ -155,7 +170,14 @@ export const CLIENT_APP_JS = `/**
     });
   });
 
+  // A tab click already goes through switchPanel directly, so this subscription
+  // is only the *other* direction: a plugin, or a slash command's openPanel
+  // callback, switching panels through the SDK. It must not re-enter
+  // switchPanel for the panel it already shows — setActivePanel is called from
+  // inside switchPanel, and routing its own event back here recursed until the
+  // stack overflowed on every tab click.
   sdk.on('panel:active', (panelId) => {
+    if (panelId === currentPanelId) return;
     switchPanel(panelId);
   });
 
@@ -167,18 +189,65 @@ export const CLIENT_APP_JS = `/**
       btn.className = 'sidebar-tab-btn';
       btn.setAttribute('data-tab', panel.id);
       const iconName = panel.icon || 'extension';
-      btn.innerHTML = '<span class="material-symbols-outlined tab-icon">' + iconName + '</span><span class="tab-label">' + escapeHtml(panel.title) + '</span>';
+      btn.innerHTML = '<span class="material-symbols-outlined tab-icon">' + escapeHtml(iconName) + '</span><span class="tab-label">' + escapeHtml(panel.title) + '</span>';
       btn.addEventListener('click', () => switchPanel(panel.id));
       tabContainer.appendChild(btn);
     }
   });
 
   // --- Slot Mounting ---
+  // Per-message slots are rendered as each row is created, not by the
+  // whole-page renderAllSlots() pass: a turn appends rows while the page sweep
+  // is not running, so a plugin putting something in message:header would only
+  // ever see the rows that existed at the last sweep. The cleanup is stored on
+  // the row so removing it (session reset, re-render) unmounts the plugin.
+  function slotContext(message) {
+    return {
+      session: {
+        id: currentSessionId,
+        title: 'Current Session',
+        messages,
+        usage: currentUsage,
+      },
+      message,
+      config: appConfig,
+      activePanel: sdk.panels.getActivePanel(),
+      sdk,
+    };
+  }
+
+  function renderMessageSlots(row, message) {
+    if (!row) return;
+    const context = slotContext(message);
+    const cleanups = [];
+    row.querySelectorAll('[data-slot]').forEach(el => {
+      const slotId = el.getAttribute('data-slot');
+      if (!slotId) return;
+      const cleanup = sdk.slots.renderSlot(slotId, el, context);
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    });
+    // Only meaningful while the row is in the transcript; a re-render throws the
+    // old rows away wholesale, so expose it rather than tracking a WeakMap.
+    row.__slotCleanups = cleanups;
+  }
+
+  function disposeMessageSlots(row) {
+    if (!row || !row.__slotCleanups) return;
+    row.__slotCleanups.forEach(fn => { try { fn(); } catch (e) {} });
+    row.__slotCleanups = [];
+  }
+
+  function disposeAllMessageSlots(root) {
+    (root || chatTranscript).querySelectorAll('.message-row').forEach(disposeMessageSlots);
+  }
+
   function renderAllSlots() {
     slotCleanups.forEach(fn => { try { fn(); } catch(e){} });
     slotCleanups = [];
 
     const slotElements = document.querySelectorAll('[data-slot]');
+    // Skip the per-message mounts: they belong to their own rows and carry the
+    // message they render for, which a page-level sweep cannot supply.
     const context = {
       session: {
         id: currentSessionId,
@@ -187,16 +256,20 @@ export const CLIENT_APP_JS = `/**
         usage: currentUsage,
       },
       config: appConfig,
+      activePanel: sdk.panels.getActivePanel(),
       sdk,
     };
 
     slotElements.forEach(el => {
       const slotId = el.getAttribute('data-slot');
-      if (slotId) {
-        const cleanup = sdk.slots.renderSlot(slotId, el, context);
-        if (typeof cleanup === 'function') slotCleanups.push(cleanup);
-      }
+      if (!slotId || slotId.startsWith('message:')) return;
+      const cleanup = sdk.slots.renderSlot(slotId, el, context);
+      if (typeof cleanup === 'function') slotCleanups.push(cleanup);
     });
+
+    // A re-sweep must not stack listeners on slots that were already rendered
+    // with their own message context.
+    chatTranscript.querySelectorAll('.message-row').forEach(renderMessageSlots);
   }
 
   sdk.on('slot:registered', () => renderAllSlots());
@@ -243,7 +316,7 @@ export const CLIENT_APP_JS = `/**
     return parts.join('');
   }
 
-  function appendUserMessage(content) {
+  function appendUserMessage(content, message) {
     if (chatWelcome) chatWelcome.style.display = 'none';
 
     const row = document.createElement('div');
@@ -255,6 +328,7 @@ export const CLIENT_APP_JS = `/**
         <span>•</span>
         <span>\${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
+      <div class="meow-slot message-header-slot" data-slot="message:header"></div>
       <div class="message-bubble">
         <div class="message-text">\${escapeHtml(content)}</div>
         <div class="message-action-bar">
@@ -276,6 +350,7 @@ export const CLIENT_APP_JS = `/**
     }
 
     chatTranscript.appendChild(row);
+    renderMessageSlots(row, message || { id: 'pending', role: 'user', content });
     scrollToBottom();
     return row;
   }
@@ -283,6 +358,7 @@ export const CLIENT_APP_JS = `/**
   function ensureAssistantCard() {
     if (activeTurnAssistantEl) return activeTurnAssistantEl;
     if (chatWelcome) chatWelcome.style.display = 'none';
+    activeTurnAssistantMessage = { id: 'streaming-' + Date.now(), role: 'assistant', content: '' };
 
     const row = document.createElement('div');
     row.className = 'message-row assistant';
@@ -296,6 +372,7 @@ export const CLIENT_APP_JS = `/**
         <span>•</span>
         <span>\${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
+      <div class="meow-slot message-header-slot" data-slot="message:header"></div>
       <div class="message-bubble assistant-bubble">
         <div class="assistant-content"></div>
         <div class="message-action-bar">
@@ -353,6 +430,9 @@ export const CLIENT_APP_JS = `/**
 
     chatTranscript.appendChild(row);
     activeTurnAssistantEl = row.querySelector('.assistant-content');
+    // Streaming rows carry the message being built, so its slots see a live
+    // content instead of nothing at all.
+    renderMessageSlots(row, activeTurnAssistantMessage);
     scrollToBottom();
     return activeTurnAssistantEl;
   }
@@ -407,6 +487,10 @@ export const CLIENT_APP_JS = `/**
 
     textNode.dataset.raw = (textNode.dataset.raw || '') + chunk;
     textNode.innerHTML = formatMarkdown(textNode.dataset.raw);
+    // Keep the streaming row's slots in step with its own content.
+    if (activeTurnAssistantMessage) {
+      activeTurnAssistantMessage.content = textNode.dataset.raw;
+    }
     scrollToBottom();
   }
 
@@ -460,18 +544,22 @@ export const CLIENT_APP_JS = `/**
       const t = sdk.i18n ? sdk.i18n.t : (k, d) => d;
       itemsList.innerHTML = todos.map(item => {
         const status = item.status || 'pending';
-        const isDone = status === 'completed';
-        const isProg = status === 'in_progress';
+        // A todo's status arrives from the model's todo_write payload and lands in a
+        // class attribute, so it is filtered down to the three states this
+        // renderer knows how to draw rather than interpolated as written.
+        const state = status === 'completed' || status === 'in_progress' ? status : 'pending';
+        const isDone = state === 'completed';
+        const isProg = state === 'in_progress';
         const icon = isDone ? 'check_circle' : isProg ? 'sync' : 'radio_button_unchecked';
         const statusLabel = isDone ? t('todo.completed', 'Completed') : isProg ? t('todo.inProgress', 'In Progress') : t('todo.pending', 'Pending');
         const tagClass = isDone ? 'todo-tag-completed' : isProg ? 'todo-tag-progress' : 'todo-tag-pending';
         const displayText = isProg && item.activeForm ? item.activeForm : (item.content || '');
 
         return \`
-          <div class="todo-item \${status}">
-            <span class="material-symbols-outlined todo-item-icon \${isProg ? 'icon-spin' : ''}">\${icon}</span>
+          <div class="todo-item \${state}">
+            <span class="material-symbols-outlined todo-item-icon \${isProg ? 'icon-spin' : ''}">\${escapeHtml(icon)}</span>
             <span class="todo-item-text">\${escapeHtml(displayText)}</span>
-            <span class="todo-status-tag \${tagClass}">\${statusLabel}</span>
+            <span class="todo-status-tag \${tagClass}">\${escapeHtml(statusLabel)}</span>
           </div>
         \`;
       }).join('');
@@ -587,9 +675,25 @@ export const CLIENT_APP_JS = `/**
     scrollToBottom();
   }
 
+  // A command's own output lands in the transcript. Errors get the same styling
+  // the server-side system rows use, so a failed /model reads the same whether it
+  // came from a reload or from the palette.
+  function appendNotice(content, isError) {
+    const row = document.createElement('div');
+    row.className = 'message-row system' + (isError ? ' is-error' : '');
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+    bubble.textContent = content;
+    row.appendChild(bubble);
+    chatTranscript.appendChild(row);
+    scrollToBottom();
+  }
+
   function renderExistingMessages(msgs) {
+    disposeAllMessageSlots();
     chatTranscript.innerHTML = '';
     activeTurnAssistantEl = null;
+    activeTurnAssistantMessage = null;
     activeTurnThinkingCard = null;
     activeTurnThinkingBody = null;
     currentToolCards.clear();
@@ -621,7 +725,7 @@ export const CLIENT_APP_JS = `/**
     msgs.forEach(m => {
       if (m.content === '__banner__') return;
       if (m.role === 'user') {
-        appendUserMessage(m.content);
+        appendUserMessage(m.content, m);
       } else if (m.role === 'assistant') {
         if (m.meta?.thinking) {
           appendThinking(m.content);
@@ -665,6 +769,7 @@ export const CLIENT_APP_JS = `/**
     });
 
     activeTurnAssistantEl = null;
+    activeTurnAssistantMessage = null;
     activeTurnThinkingCard = null;
     activeTurnThinkingBody = null;
     scrollToBottom();
@@ -674,13 +779,45 @@ export const CLIENT_APP_JS = `/**
     chatTranscript.scrollTop = chatTranscript.scrollHeight;
   }
 
+  // The TUI's own test for "this line is a slash command" (commands/isCommand),
+  // restated because the client is served as a raw string with no module graph:
+  // the browser and the server must agree on which lines are commands, or a line
+  // this side queues as prose comes back from the server as a command.
+  function isCommand(text) {
+    return String(text).trim().startsWith('/');
+  }
+
   // --- Send / Abort Turn ---
   async function handleSend() {
     const text = promptInput.value.trim();
-    if (!text || isRunning) return;
+    if (!text) return;
 
     promptInput.value = '';
     autoResizeInput();
+
+    // Type-ahead: a turn is already streaming, so queue the line instead of
+    // dropping it. The agent loop drains it after the next tool batch (takePending),
+    // which is exactly how the TUI behaves while it streams.
+    if (isRunning) {
+      // A "/" line is not prose, so it cannot ride the turn as type-ahead: the
+      // server refuses to feed it to the model and answers with what the command
+      // printed, so route it through the palette's own runner here — which also
+      // gets its confirmation dialog, its argument prompt, and the right toast.
+      if (isCommand(text)) {
+        const name = text.slice(1).split(/\s+/)[0];
+        await runSlashCommand(name, text.slice(1 + name.length).trim());
+        return;
+      }
+      appendUserMessage(text);
+      try {
+        await sdk.api.queueTurnText(text);
+        sdk.ui.showToast({ message: sdk.i18n.t('chat.queued'), type: 'info' });
+      } catch (e) {
+        sdk.ui.showToast({ message: 'Error: ' + e.message, type: 'error' });
+      }
+      return;
+    }
+
     appendUserMessage(text);
     sdk.emit('chat:messages', { count: (messages?.length || 0) + 1 });
     sdk.emit('turn:start', { prompt: text });
@@ -737,7 +874,10 @@ export const CLIENT_APP_JS = `/**
     isRunning = running;
     sendBtn.style.display = running ? 'none' : 'inline-flex';
     abortBtn.style.display = running ? 'inline-flex' : 'none';
-    promptInput.disabled = running;
+    if (queueBtn) queueBtn.style.display = running ? 'inline-flex' : 'none';
+    // Stay typeable while a turn streams: Enter then queues the line for the
+    // running turn (handleSend → /api/turn/queue) instead of being dropped.
+    promptInput.disabled = false;
     if (appLinearProgress) {
       if (running) {
         appLinearProgress.classList.remove('hidden');
@@ -747,6 +887,86 @@ export const CLIENT_APP_JS = `/**
     }
     agentActivityStatus.textContent = running ? sdk.i18n.t('statusbar.running') : sdk.i18n.t('statusbar.ready');
     sdk.emit('status:change', { isRunning });
+  }
+
+  // --- Provider retry / workflow / sub-agent chrome ---
+  // These three agent events used to be dropped on the floor even though the bridge
+  // emits them: a silent retry looks like a hang, and an invisible workflow looks
+  // like the model stopped working.
+
+  let activeRetryUntil = null;
+
+  function appendRetryNotice(ev) {
+    const host = document.querySelector('#retry-notice');
+    if (!host) return;
+    activeRetryUntil = Date.now() + (ev.delayMs || 0);
+    const secs = Math.max(0, Math.round((ev.delayMs || 0) / 1000));
+    host.textContent = sdk.i18n.t('chat.retrying', {
+      attempt: ev.attempt,
+      max: ev.max,
+      secs: secs,
+      reason: ev.reason || '',
+    });
+    host.classList.remove('hidden');
+    sdk.emit('agent:retry', ev);
+  }
+
+  function clearRetryNotice() {
+    activeRetryUntil = null;
+    const host = document.querySelector('#retry-notice');
+    if (host) {
+      host.textContent = '';
+      host.classList.add('hidden');
+    }
+  }
+
+  function renderAgentList(list, activeId, kind) {
+    const host = document.querySelector('#subagent-strip');
+    if (!host) return;
+    const items = (list || []).map((a) => {
+      const sel = a.id === activeId ? ' active' : '';
+      const st = a.state || 'running';
+      // steps is a count, but it arrives over SSE like every other field here,
+      // so it gets the same treatment rather than being trusted by type.
+      const steps = Number(a.steps) > 0 ? String(Math.floor(Number(a.steps))) : '';
+      return '<button type="button" class="subagent-chip' + sel + '" data-subagent-id="' +
+        escapeHtml(a.id) + '" data-subagent-kind="' + escapeHtml(kind || 'agent') + '">' +
+        '<span class="material-symbols-outlined icon-xs">' +
+        (st === 'done' ? 'check_circle' : st === 'error' ? 'error' : 'pending') +
+        '</span><span class="subagent-chip-label">' + escapeHtml(a.label || a.id) + '</span>' +
+        (steps ? '<span class="subagent-chip-steps">' + escapeHtml(steps) + '</span>' : '') +
+        '</button>';
+    });
+    host.innerHTML = items.join('');
+    host.classList.toggle('hidden', items.length === 0);
+  }
+
+  function updateWorkflowView(snap) {
+    if (!snap) return;
+    renderAgentList(snap.agents, null, 'workflow');
+    if (snap.done) {
+      if (agentActivityStatus) agentActivityStatus.textContent = sdk.i18n.t('statusbar.ready');
+    } else if (agentActivityStatus) {
+      const running = (snap.agents || []).filter((a) => a.state === 'running').length;
+      agentActivityStatus.textContent = snap.title +
+        ' (' + running + '/' + (snap.agents || []).length + ')';
+    }
+    sdk.emit('agent:workflow', snap);
+  }
+
+  function updateAgentView(snap) {
+    if (!snap) return;
+    // AgentSnapshot is one live sub-agent transcript; keep a strip of every one
+    // seen this turn so the user can tell what the model delegated.
+    seenSubagents = seenSubagents.filter((a) => a.id !== snap.id);
+    seenSubagents.push({ id: snap.id, label: snap.label || snap.type || snap.id, state: snap.state, steps: snap.steps });
+    renderAgentList(seenSubagents, snap.id, 'agent');
+    if (agentActivityStatus) {
+      agentActivityStatus.textContent = snap.done
+        ? sdk.i18n.t('statusbar.ready')
+        : (snap.activity || snap.type || sdk.i18n.t('statusbar.running'));
+    }
+    sdk.emit('agent:subagent', snap);
   }
 
   // --- Interactive Demo Showcase Generator ---
@@ -1030,71 +1250,718 @@ export const CLIENT_APP_JS = `/**
   const cmdPaletteModal = document.querySelector('#cmd-palette-modal');
   const cmdPaletteSearchInput = document.querySelector('#cmd-palette-search-input');
   const cmdPaletteList = document.querySelector('#cmd-palette-list');
+  const cmdPalettePreview = document.querySelector('#cmd-palette-preview');
+  const cmdPaletteHint = document.querySelector('#cmd-palette-hint');
+  const cmdPaletteCount = document.querySelector('#cmd-palette-count');
   const cmdPaletteCloseBtn = document.querySelector('#cmd-palette-close-btn');
   const cmdPaletteCancelBtn = document.querySelector('#cmd-palette-cancel-btn');
 
-  const COMMANDS = [
-    { icon: 'auto_awesome', title: '/demo', desc: 'Experience the full agent reasoning & tool showcase', run: () => playDemoShowcase() },
-    { icon: 'fact_check', title: '/test', desc: 'Run project test suite and verify harness health', run: () => { promptInput.value = 'Run project test suite and verify harness health'; handleSend(); } },
-    { icon: 'folder', title: '/files', desc: 'Switch to Workspace Files Explorer', run: () => switchPanel('files') },
-    { icon: 'construction', title: '/tools', desc: 'Switch to Agent Toolset Inspector', run: () => switchPanel('tools') },
-    { icon: 'palette', title: '/theme', desc: 'Toggle Dark / Light theme mode', run: () => { if (themeSwitch) themeSwitch.click(); } },
-    { icon: 'delete_sweep', title: '/clear', desc: 'Reset conversation session and start fresh', run: () => handleNewSession() },
-    { icon: 'psychology', title: '/model', desc: 'Switch AI model & reasoning configuration', run: () => openModelSelectorModal() },
-    { icon: 'monitoring', title: '/tokens', desc: 'View token usage metrics and statistics', run: () => sdk.ui.showToast({ message: 'Token usage: in=' + (currentUsage.inputTokens||0) + ', out=' + (currentUsage.outputTokens||0), type: 'info' }) },
-    { icon: 'help_outline', title: '/help', desc: 'Display agent architecture & quick tips', run: () => { promptInput.value = 'Explain the architecture and main workflows of this project'; handleSend(); } },
+  // --- Dialog widgets ------------------------------------------------------
+  // Four shapes cover every interactive question a command can ask. Each returns
+  // null on cancel, so a caller can distinguish "declined" from "answered with
+  // the same value" without a sentinel.
+
+  function askEnum(title, options, opts = {}) {
+    return new Promise((resolve) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'dialog-enum';
+      options.forEach((opt, i) => {
+        const row = document.createElement('button');
+        const selected = opts.current !== undefined && String(opt.value) === String(opts.current);
+        row.type = 'button';
+        row.className = 'dialog-enum-row' + (selected ? ' is-active' : '');
+        row.setAttribute('role', 'radio');
+        row.setAttribute('aria-checked', selected ? 'true' : 'false');
+        // 1-9 selects directly; the hint says so rather than leaving the user
+        // to discover it.
+        row.innerHTML = \`
+          <span class="dialog-enum-key">\${i < 9 ? i + 1 : ''}</span>
+          <span class="dialog-enum-text">
+            <span class="dialog-enum-label">\${escapeHtml(opt.label)}</span>
+            \${opt.description ? \`<span class="dialog-enum-desc">\${escapeHtml(opt.description)}</span>\` : ''}
+          </span>
+        \`;
+        row.onclick = () => {
+          close();
+          resolve(opt.value);
+        };
+        wrap.appendChild(row);
+      });
+      // Focus lands on the current value so Enter is never a blind commit.
+      const initial = wrap.querySelector('.is-active') || wrap.querySelector('.dialog-enum-row');
+      if (initial) initial.dataset.autofocus = '';
+      const close = sdk.ui.showModal({
+        title,
+        width: '460px',
+        content: wrap,
+        cancelText: sdk.i18n.t('common.cancel'),
+        confirmText: sdk.i18n.t('common.apply'),
+        onCancel: () => resolve(null),
+        onConfirm: () => {
+          const active = wrap.querySelector('.is-active');
+          if (!active) return false;
+          resolve(Number(active.dataset.index));
+          return undefined;
+        },
+      });
+      // data-index is what onConfirm reads back; assign after the listeners.
+      wrap.querySelectorAll('.dialog-enum-row').forEach((row, i) => { row.dataset.index = String(i); });
+      // 1-9 pick a row directly; Enter commits the current one.
+      wrap.addEventListener('keydown', (e) => {
+        if (!/^[1-9]$/.test(e.key)) return;
+        const row = wrap.querySelectorAll('.dialog-enum-row')[Number(e.key) - 1];
+        if (row) row.click();
+      });
+    });
+  }
+
+  function askChoice(title, items, opts = {}) {
+    return new Promise((resolve) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'dialog-choice';
+      const search = document.createElement('input');
+      search.type = 'text';
+      search.className = 'dialog-choice-search';
+      search.placeholder = opts.placeholder || sdk.i18n.t('common.search');
+      const list = document.createElement('div');
+      list.className = 'dialog-choice-list';
+      list.setAttribute('role', 'listbox');
+      wrap.appendChild(search);
+      wrap.appendChild(list);
+
+      function draw() {
+        const q = search.value.trim().toLowerCase();
+        const filtered = items.filter((it) =>
+          !q || String(it.label).toLowerCase().includes(q) || String(it.value).toLowerCase().includes(q));
+        list.innerHTML = '';
+        if (!filtered.length) {
+          list.innerHTML = \`<div class="empty-state text-dim text-xs">\${escapeHtml(sdk.i18n.t('dialog.noResults'))}</div>\`;
+          return;
+        }
+        filtered.forEach((it) => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'dialog-choice-row';
+          row.setAttribute('role', 'option');
+          row.innerHTML = \`<span>\${escapeHtml(it.label)}</span>\${it.description ? \`<span class="dialog-choice-desc">\${escapeHtml(it.description)}</span>\` : ''}\`;
+          row.onclick = () => {
+            close();
+            resolve(it.value);
+          };
+          list.appendChild(row);
+        });
+      }
+
+      search.addEventListener('input', draw);
+      search.dataset.autofocus = '';
+      draw();
+      const close = sdk.ui.showModal({
+        title,
+        width: '440px',
+        content: wrap,
+        cancelText: sdk.i18n.t('common.cancel'),
+        confirmText: sdk.i18n.t('common.save'),
+        onCancel: () => resolve(null),
+      });
+    });
+  }
+
+  function askConfirm(title, message, opts = {}) {
+    return new Promise((resolve) => {
+      const wrap = document.createElement('p');
+      wrap.className = 'dialog-confirm';
+      wrap.textContent = message;
+      sdk.ui.showModal({
+        title,
+        width: '400px',
+        content: wrap,
+        cancelText: sdk.i18n.t('common.cancel'),
+        confirmText: opts.confirmText || sdk.i18n.t('common.done'),
+        onCancel: () => resolve(false),
+        onConfirm: () => { resolve(true); },
+        className: opts.destructive ? 'is-destructive' : '',
+        // A destructive action starts on Cancel: Enter must never be the
+        // dangerous answer to a question you did not read.
+        autofocusCancel: opts.destructive,
+      });
+    });
+  }
+
+  function askText(title, opts = {}) {
+    return new Promise((resolve) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'dialog-text';
+      const input = document.createElement(opts.multiline ? 'textarea' : 'input');
+      if (!opts.multiline) input.type = 'text';
+      input.className = 'dialog-text-input';
+      input.placeholder = opts.placeholder || '';
+      input.value = opts.value || '';
+      if (opts.multiline) input.rows = 4;
+      input.dataset.autofocus = '';
+      const hint = document.createElement('p');
+      hint.className = 'dialog-text-hint text-dim text-xs';
+      hint.textContent = sdk.i18n.t('dialog.text.submitHint');
+      wrap.appendChild(input);
+      wrap.appendChild(hint);
+      // Ctrl/Cmd+Enter submits: a textarea eats plain Enter as a newline.
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          wrap.closest('.modal-container').querySelector('.modal-btn-confirm').click();
+        }
+      });
+      sdk.ui.showModal({
+        title,
+        width: opts.width || '520px',
+        content: wrap,
+        cancelText: sdk.i18n.t('common.cancel'),
+        confirmText: opts.confirmText || sdk.i18n.t('common.send'),
+        onCancel: () => resolve(null),
+        onConfirm: () => {
+          const text = input.value.trim();
+          if (!text) return false;
+          resolve(text);
+          return undefined;
+        },
+      });
+    });
+  }
+
+  // --- Command Palette: the real slash-command registry -------------------
+  // Was nine hardcoded entries that shared nothing with the TUI's ~45. The list
+  // now comes from GET /api/commands, so a command added as a Markdown file
+  // under .meowcode/commands appears here without touching the browser.
+
+  const CLIENT_COMMANDS = [
+    { name: 'demo', icon: 'auto_awesome', title: 'Demo Showcase', desc: 'Experience the full agent reasoning & tool showcase', local: true, run: () => playDemoShowcase() },
+    { name: 'files', icon: 'folder', title: 'Browse Files', desc: 'Switch to the workspace file explorer', local: true, run: () => switchPanel('files') },
+    { name: 'tools', icon: 'construction', title: 'Inspect Tools', desc: 'Switch to the agent tool inspector', local: true, run: () => switchPanel('tools') },
+    { name: 'ws', icon: 'developer_board', title: 'Workspace Info', desc: 'Repository, branch, provider and model', local: true, run: () => openWorkspaceInfo() },
+    { name: 'model', icon: 'psychology', title: 'Switch Model', desc: 'Pick the model from a list', local: true, run: () => askEnum(sdk.i18n.t('modal.model.title'), MODELS.map((m) => ({ value: m.id, label: m.name, description: m.desc })), { current: appConfig.model }).then((id) => { if (id) sdk.api.updateConfig({ model: id }); }) },
   ];
+
+  let paletteCommands = [];
+
+  // The five groups from the design spec. A command lands in the first bucket
+  // whose name list contains it; anything unrecognised falls through to the
+  // last, so a new command is never invisible.
+  const PALETTE_GROUPS = [
+    { id: 'recent', label: 'palette.group.recent', names: ['demo', 'files', 'tools', 'ws', 'help', 'init'] },
+    { id: 'orchestration', label: 'palette.group.orchestration', names: ['loop', 'goal', 'plan', 'review', 'agents', 'dm', 'skill', 'memory'] },
+    { id: 'context', label: 'palette.group.context', names: ['model', 'provider', 'effort', 'output-style', 'autocompact', 'compact', 'config', 'theme', 'vim', 'statusline', 'permissions', 'editor', 'status', 'usage', 'stats', 'copy', 'rewind'] },
+    { id: 'session', label: 'palette.group.session', names: ['clear', 'new', 'sessions', 'resume', 'fork', 'exit', 'version', 'doctor', 'hooks', 'mcp', 'entry', 'worktree', 'ide', 'chrome', 'feedback', 'export', 'login', 'logout', 'terminal-setup', 'web', 'webui'] },
+    { id: 'custom', label: 'palette.group.custom', names: [] },
+  ];
+
+  function paletteGroupFor(name) {
+    for (const group of PALETTE_GROUPS) {
+      if (group.names.includes(name)) return group.id;
+    }
+    return 'custom';
+  }
+
+  const CMD_ICONS = {
+    help: 'help_outline', clear: 'delete_sweep', new: 'add', model: 'psychology',
+    provider: 'cloud', login: 'login', logout: 'logout', effort: 'speed',
+    'output-style': 'format_ink_highlighter', vim: 'keyboard', theme: 'palette',
+    goal: 'flag', plan: 'architecture', loop: 'loop', memory: 'brain',
+    config: 'tune', usage: 'monitoring', status: 'info', stats: 'query_stats',
+    compact: 'compress', autocompact: 'compress', skill: 'school', init: 'rocket_launch',
+    hooks: 'webhook', mcp: 'hub', agents: 'groups', doctor: 'health_and_safety',
+    export: 'download', review: 'rate_review', 'terminal-setup': 'terminal',
+    statusline: 'view_agenda', permissions: 'lock', copy: 'content_copy',
+    worktree: 'account_tree', editor: 'edit', feedback: 'rate_review',
+    rewind: 'undo', dm: 'forum', sessions: 'chat', ide: 'code', chrome: 'travel_explore',
+    entry: 'dashboard_customize', resume: 'history', fork: 'call_split',
+    version: 'tag', exit: 'logout', web: 'language',
+  };
+
+  async function loadPaletteCommands() {
+    try {
+      const data = await sdk.api.listCommands();
+      paletteCommands = Array.isArray(data.commands) ? data.commands : [];
+    } catch (e) {
+      console.warn('Could not load commands:', e);
+      paletteCommands = [];
+    }
+    if (cmdPaletteModal && cmdPaletteModal.style.display !== 'none') renderCommandPaletteList();
+  }
+
+  // Every row the palette can show: registry commands plus the browser-only
+  // extras, each tagged with the group and the shape of its argument.
+  function paletteRows() {
+    const rows = CLIENT_COMMANDS.concat(pluginRows()).map((c) => ({
+      key: c.name,
+      name: c.name,
+      title: c.title,
+      desc: c.desc,
+      icon: c.icon,
+      group: paletteGroupFor(c.name),
+      local: true,
+      tuiOnly: false,
+      run: c.run,
+    }));
+    // A browser-native row replaces the registry entry of the same name, so
+    // /model appears once — as the dialog, not as the terminal command.
+    const native = new Set(rows.map((r) => r.name));
+    for (const cmd of paletteCommands) {
+      if (native.has(cmd.name)) continue;
+      rows.push({
+        key: cmd.name,
+        name: cmd.name,
+        title: '/' + cmd.name,
+        desc: cmd.description || '',
+        icon: CMD_ICONS[cmd.name] || 'terminal',
+        group: paletteGroupFor(cmd.name),
+        local: false,
+        tuiOnly: cmd.tuiOnly === true,
+        aliases: cmd.aliases || [],
+      });
+    }
+    return rows;
+  }
+
+  // Plugins register through sdk.commands.register(); they arrive as plain
+  // {id, title, execute} entries, so they join the palette as a custom group
+  // rather than needing a server round-trip.
+  sdk.on('command:registered', () => {
+    if (cmdPaletteModal && cmdPaletteModal.style.display !== 'none') renderCommandPaletteList();
+  });
+
+  function pluginRows() {
+    return (sdk.commands.getCommands() || [])
+      .filter((c) => c && c.id)
+      .map((c) => ({
+        key: 'plugin:' + c.id,
+        name: c.id,
+        title: c.title || c.id,
+        desc: c.description || sdk.i18n.t('palette.pluginSource'),
+        icon: c.icon || 'extension',
+        group: 'custom',
+        local: true,
+        tuiOnly: false,
+        run: () => sdk.commands.execute(c.id),
+      }));
+  }
+
+  let paletteFiltered = [];
+  let paletteIndex = 0;
+  let paletteInPreview = false;
 
   function openCommandPalette() {
     if (!cmdPaletteModal) return;
     cmdPaletteModal.style.display = 'flex';
+    paletteInPreview = false;
     if (cmdPaletteSearchInput) {
       cmdPaletteSearchInput.value = '';
       setTimeout(() => cmdPaletteSearchInput.focus(), 60);
     }
-    renderCommandPaletteList(COMMANDS);
+    renderCommandPaletteList();
   }
 
-  function renderCommandPaletteList(cmds) {
+  function renderCommandPaletteList() {
     if (!cmdPaletteList) return;
     const q = (cmdPaletteSearchInput ? cmdPaletteSearchInput.value : '').trim().toLowerCase();
-    const filtered = cmds.filter(c => !q || c.title.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q));
+    // Snapshot before reassigning: the "keep the selection across a re-filter"
+    // lookup below reads paletteFiltered, so reading the key after the assignment
+    // looks for the old key in the new list and lands on -1 — which Math.max(0, …)
+    // turns into a reset to the first row on every keystroke.
+    const previousKey = paletteFiltered[paletteIndex] ? paletteFiltered[paletteIndex].key : null;
+    const all = paletteRows();
+    const matches = all.filter((c) =>
+      !q || c.title.toLowerCase().includes(q) || (c.desc || '').toLowerCase().includes(q) ||
+      c.name.toLowerCase().includes(q) || (c.aliases || []).some((a) => a.includes(q)) ||
+      // The CLI chip is drawn on every terminal-only row, so it has to be
+      // searchable too — otherwise "cli" and "terminal" match nothing at all.
+      (c.tuiOnly ? 'cli terminal only' : '').includes(q));
 
-    if (!filtered.length) {
-      cmdPaletteList.innerHTML = '<div class="empty-state text-dim text-xs" style="padding:16px;">No matching commands</div>';
+    // Grouped, in PALETTE_GROUPS order. The rows arrive in registry order, which
+    // interleaves the groups ("最近与推荐, 上下文与模型, … 最近与推荐, …"), and a
+    // header is emitted per change of group — so unsorted, 57 rows printed 24
+    // headers, most of them for a group the reader had already left. Sorting is
+    // what makes the header mean "everything below this until the next one".
+    // The sort is stable, so a query's own ordering survives inside each group.
+    const rank = new Map(PALETTE_GROUPS.map((g, i) => [g.id, i]));
+    paletteFiltered = matches
+      .map((c, i) => [c, i])
+      .sort((a, b) => (rank.get(a[0].group) ?? 99) - (rank.get(b[0].group) ?? 99) || a[1] - b[1])
+      .map((p) => p[0]);
+
+    if (!paletteFiltered.length) {
+      cmdPaletteList.innerHTML = \`<div class="empty-state text-dim text-xs" style="padding:16px;">\${escapeHtml(sdk.i18n.t('dialog.noResults'))}</div>\`;
+      // The hint and the count are still the user's next click of information;
+      // returning early without them leaves a stale "12" and a stale Enter hint
+      // beside an empty list.
+      renderCommandPreview(null);
+      updatePaletteHint();
       return;
     }
+    // Preserve the selection across a re-filter when the row survives it.
+    paletteIndex = Math.max(0, paletteFiltered.findIndex((c) => c.key === previousKey));
 
     cmdPaletteList.innerHTML = '';
-    filtered.forEach(cmd => {
+    let lastGroup = null;
+    paletteFiltered.forEach((cmd, i) => {
+      if (cmd.group !== lastGroup) {
+        lastGroup = cmd.group;
+        const head = document.createElement('div');
+        head.className = 'cmd-palette-group';
+        head.textContent = sdk.i18n.t(PALETTE_GROUPS.find((g) => g.id === cmd.group)?.label || 'palette.group.custom');
+        cmdPaletteList.appendChild(head);
+      }
       const row = document.createElement('div');
-      row.className = 'cmd-palette-row';
+      row.className = 'cmd-palette-row' + (i === paletteIndex ? ' is-focused' : '') + (cmd.tuiOnly ? ' is-tui-only' : '');
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', i === paletteIndex ? 'true' : 'false');
+      // The row's identity, for the palette's own tests and for a probe that
+      // wants to say which command it drove without reading its label.
+      row.setAttribute('data-command', cmd.key);
       row.innerHTML = \`
-        <div class="cmd-palette-left">
-          <span class="material-symbols-outlined cmd-palette-icon">\${cmd.icon}</span>
-          <div class="cmd-palette-info">
-            <span class="cmd-palette-title">\${cmd.title}</span>
-            <span class="cmd-palette-desc">\${cmd.desc}</span>
-          </div>
-        </div>
-        <span class="cmd-palette-chip">↵ Run</span>
+        <span class="material-symbols-outlined cmd-palette-icon">\${escapeHtml(cmd.icon || 'terminal')}</span>
+        <span class="cmd-palette-info">
+          <span class="cmd-palette-title">\${escapeHtml(cmd.title)}\${cmd.tuiOnly ? '<span class="cmd-chip-terminal" title="Runs in the terminal only">CLI</span>' : ''}</span>
+          <span class="cmd-palette-desc">\${escapeHtml(cmd.desc || '')}</span>
+        </span>
       \`;
-      row.addEventListener('click', () => {
-        closeCommandPalette();
-        cmd.run();
-      });
+      row.onclick = () => {
+        paletteIndex = i;
+        paletteInPreview = true;
+        renderCommandPaletteList();
+      };
+      row.ondblclick = () => { paletteIndex = i; executePaletteCommand(cmd); };
       cmdPaletteList.appendChild(row);
     });
+
+    const focused = cmdPaletteList.querySelector('.cmd-palette-row.is-focused');
+    if (focused) focused.scrollIntoView({ block: 'nearest' });
+    updatePaletteHint();
+    renderCommandPreview(paletteFiltered[paletteIndex] || null);
+  }
+
+  // The footer hint is the only place that states the keyboard contract, so it
+  // changes with the focus: what Enter will do depends on whether the preview
+  // pane holds the focus, and a TUI-only row's Enter copies rather than runs.
+  function updatePaletteHint() {
+    if (cmdPaletteModal) cmdPaletteModal.querySelector('.cmd-palette-container').classList.toggle('is-in-preview', paletteInPreview);
+    if (cmdPaletteCount) {
+      const total = paletteRows().length;
+      cmdPaletteCount.textContent = paletteFiltered.length === total
+        ? String(total)
+        : sdk.i18n.t('palette.count', { n: paletteFiltered.length, total });
+    }
+    if (!cmdPaletteHint) return;
+    const cmd = paletteFiltered[paletteIndex];
+    if (!cmd) {
+      cmdPaletteHint.textContent = sdk.i18n.t('palette.hint.none');
+      return;
+    }
+    const enterKey = paletteInPreview
+      ? sdk.i18n.t('palette.hint.runButton')
+      : cmd.tuiOnly
+        ? sdk.i18n.t('palette.hint.copy')
+        : sdk.i18n.t('palette.hint.run');
+    cmdPaletteHint.textContent = enterKey + ' · ' + sdk.i18n.t('palette.hint.navigate');
+  }
+
+  // Moving focus into the preview pane puts it on the action button, so Tab and
+  // Enter both act on what the pane describes. Tab there is a no-op bounce back,
+  // which is what makes Tab a reliable "toggle columns" key.
+  function focusPreview() {
+    const btn = cmdPalettePreview && cmdPalettePreview.querySelector('.cmd-preview-run');
+    if (btn) btn.focus();
+  }
+
+  function renderCommandPreview(cmd) {
+    if (!cmdPalettePreview) return;
+    if (!cmd) {
+      cmdPalettePreview.innerHTML = \`<div class="cmd-preview-empty text-dim text-xs">\${escapeHtml(sdk.i18n.t('palette.preview.empty'))}</div>\`;
+      return;
+    }
+    const aliases = (cmd.aliases || []).length
+      ? \`<div class="cmd-preview-aliases"><span class="cmd-preview-label">\${escapeHtml(sdk.i18n.t('palette.preview.aliases'))}</span>\${cmd.aliases.map((a) => \`<code>/\${escapeHtml(a)}</code>\`).join(' ')}</div>\`
+      : '';
+    const status = cmd.tuiOnly
+      ? \`<span class="cmd-preview-pill is-terminal">\${escapeHtml(sdk.i18n.t('palette.tuiOnly'))}</span>\`
+      : \`<span class="cmd-preview-pill is-web">\${escapeHtml(sdk.i18n.t('palette.webRunnable'))}</span>\`;
+    cmdPalettePreview.innerHTML = \`
+      <div class="cmd-preview-head">
+        <span class="material-symbols-outlined cmd-preview-icon">\${escapeHtml(cmd.icon || 'terminal')}</span>
+        <div>
+          <div class="cmd-preview-title">\${escapeHtml(cmd.title)}</div>
+          <div class="cmd-preview-desc">\${escapeHtml(cmd.desc || '')}</div>
+        </div>
+      </div>
+      \${aliases}
+      <div class="cmd-preview-status">\${status}</div>
+      <p class="cmd-preview-hint text-dim text-xs">\${escapeHtml(cmd.tuiOnly ? sdk.i18n.t('palette.copyHint') : sdk.i18n.t('palette.runHint'))}</p>
+      <button class="m3-action-btn m3-btn-filled cmd-preview-run" type="button">
+        \${escapeHtml(cmd.tuiOnly ? sdk.i18n.t('palette.copyAction') : sdk.i18n.t('palette.runAction'))}
+      </button>
+    \`;
+    const runBtn = cmdPalettePreview.querySelector('.cmd-preview-run');
+    if (runBtn) runBtn.onclick = () => executePaletteCommand(cmd);
+    updatePaletteHint();
+  }
+
+  function movePaletteSelection(delta) {
+    if (!paletteFiltered.length) return;
+    paletteIndex = (paletteIndex + delta + paletteFiltered.length) % paletteFiltered.length;
+    paletteInPreview = false;
+    renderCommandPaletteList();
+  }
+
+  // TUI-only commands are copied rather than run: their CommandContext callbacks
+  // (overlay pickers, the loop driver, the login panel) have no browser host, so
+  // running one would print "terminal only" and do nothing.
+  async function executePaletteCommand(cmd) {
+    if (!cmd) return;
+    if (cmd.local) {
+      closeCommandPalette();
+      await cmd.run();
+      return;
+    }
+    if (cmd.tuiOnly) {
+      const cli = 'meowcode ' + cmd.name;
+      try {
+        await navigator.clipboard.writeText(cli);
+        closeCommandPalette();
+        sdk.ui.showToast({ message: sdk.i18n.t('palette.copied', { cmd: cli }), type: 'info' });
+      } catch (e) {
+        sdk.ui.showToast({ message: cli, type: 'info' });
+      }
+      return;
+    }
+    closeCommandPalette();
+    await runSlashCommand(cmd.name, '');
+  }
+
+  // What a command wants before it can run. Most are derived from the SETTINGS
+  // row the command writes to (via \`setting\`), so /effort and /effort <value>
+  // stay in step with the schema by construction; only the free-text commands
+  // need a hand-written entry.
+  const CMD_TEXT_ARGS = {
+    goal: { placeholder: 'palette.arg.goal', multiline: true },
+    loop: { placeholder: 'palette.arg.loop' },
+    feedback: { placeholder: 'palette.arg.feedback', multiline: true },
+    memory: { placeholder: 'palette.arg.memory' },
+    agents: { placeholder: 'palette.arg.agents' },
+    mcp: { placeholder: 'palette.arg.mcp' },
+    statusline: { placeholder: 'palette.arg.statusline' },
+    skill: { placeholder: 'palette.arg.skill' },
+    ide: { placeholder: 'palette.arg.ide' },
+  };
+
+  // Commands that mean something destructive even in their bare form: the palette
+  // asks first instead of firing them on a stray Enter.
+  const CMD_CONFIRM_BARE = {
+    compact: { message: 'palette.confirm.compact', destructive: true },
+    clear: { message: 'palette.confirm.clear', destructive: true },
+    reset: { message: 'palette.confirm.clear', destructive: true },
+    rewind: { message: 'palette.confirm.rewind', destructive: true },
+    exit: { message: 'palette.confirm.exit', destructive: false },
+  };
+
+  // Maps a command name to the SETTINGS key it drives. A command absent here and
+  // absent from CMD_TEXT_ARGS runs bare — /help, /version, /doctor and friends.
+  // A command whose argument is a setting *value*. The palette sends the chosen
+  // value as the command's argument rather than writing the config itself: the
+  // command stays the one place that decides what a value means, prints the
+  // confirmation, and broadcasts the change, so the browser and the terminal can
+  // never disagree about what "/effort high" just did.
+  const CMD_ENUM_ARGS = {
+    effort: 'effort',
+    'output-style': 'outputStyle',
+    language: 'language',
+    'thinking-mode': 'thinkingMode',
+    permissions: 'permissionMode',
+    vim: 'editorMode',
+  };
+
+  // /autocompact has three states (auto / off / an explicit token window) that no
+  // single setting row expresses, so it gets its own small enum.
+  const CMD_ENUM_ARGS_CUSTOM = {
+    autocompact: {
+      values: ['auto', 'off'],
+      current: () => {
+        if (settingValue('autoCompact') === false) return 'off';
+        return Number(settingValue('autoCompactWindow')) > 0 ? 'custom' : 'auto';
+      },
+    },
+  };
+
+  function settingSpecFor(key) {
+    if (!settingsSchema) return null;
+    return (settingsSchema.settings || []).find((s) => s.key === key) || null;
+  }
+
+  function currentProviderId() {
+    return appConfig.provider || 'mock';
+  }
+
+  function providerChoices() {
+    const ids = ['mock', 'anthropic'];
+    for (const p of (appConfig.customProviders || [])) if (p && p.id) ids.push(p.id);
+    const seen = new Set();
+    return ids.filter((id) => !seen.has(id) && seen.add(id)).map((id) => ({ value: id, label: id }));
+  }
+
+  function modelChoices() {
+    const list = MODELS.map((m) => ({ value: m.id, label: m.name, description: m.desc }));
+    return list.length ? list : [{ value: appConfig.model, label: appConfig.model }];
+  }
+
+  // The theme list is the server's, not the schema's: themeList() includes the
+  // user's own themes, so GET /api/config carries the names and the browser asks
+  // rather than guessing. Falling back to the current value keeps the dialog
+  // usable if the field is missing (older server, or a failed config fetch).
+  function themeChoices() {
+    const rows = (appConfig.themes || []).map((t2) => ({ value: t2.name, label: t2.label || t2.name }));
+    if (rows.length) return rows;
+    const current = appConfig.theme || 'default';
+    return [{ value: current, label: current }];
+  }
+
+  function enumChoices(spec) {
+    return ((spec && spec.values) || []).map((v) => ({ value: v, label: String(v) }));
+  }
+
+  function currentFor(spec) {
+    if (spec.type === 'boolean') return settingValue(spec.key) === true;
+    return settingValue(spec.key);
+  }
+
+  function argSpecFor(name) {
+    const text = CMD_TEXT_ARGS[name];
+    if (text) return { kind: 'text', placeholder: sdk.i18n.t(text.placeholder), multiline: text.multiline === true };
+    const confirm = CMD_CONFIRM_BARE[name];
+    if (confirm) return { kind: 'confirm', message: sdk.i18n.t(confirm.message), destructive: confirm.destructive };
+
+    if (name === 'theme') {
+      const items = themeChoices();
+      return { kind: 'enum', items, current: () => appConfig.theme };
+    }
+    if (name === 'model') {
+      const items = modelChoices();
+      return { kind: 'choice', items, current: () => appConfig.model };
+    }
+    if (name === 'provider') {
+      const items = providerChoices();
+      return { kind: 'enum', items, current: () => currentProviderId() };
+    }
+    const custom = CMD_ENUM_ARGS_CUSTOM[name];
+    if (custom) {
+      return { kind: 'enum', items: custom.values.map((v) => ({ value: v, label: v })), current: custom.current };
+    }
+    const key = CMD_ENUM_ARGS[name];
+    if (key) {
+      const spec = settingSpecFor(key);
+      const items = spec ? ((spec.values) || []).map((v) => ({ value: v, label: String(v) })) : [];
+      if (items.length) return { kind: 'enum', items, current: () => settingValue(key) };
+    }
+    return { kind: 'bare' };
+  }
+
+  async function runSlashCommand(name, args) {
+    const spec = argSpecFor(name);
+    let finalArgs = args || '';
+
+    if (!finalArgs) {
+      if (spec.kind === 'enum') {
+        const value = await askEnum('/' + name, spec.items, { current: spec.current && spec.current() });
+        if (value === null || value === undefined) return;
+        finalArgs = String(value);
+      } else if (spec.kind === 'choice') {
+        if (!spec.items.length) return;
+        const value = await askChoice('/' + name, spec.items, { placeholder: sdk.i18n.t('common.search') });
+        if (value === null) return;
+        finalArgs = String(value);
+      } else if (spec.kind === 'confirm') {
+        const ok = await askConfirm('/' + name, spec.message, { destructive: spec.destructive, confirmText: sdk.i18n.t('palette.runAction') });
+        if (!ok) return;
+      } else if (spec.kind === 'text') {
+        const value = await askText('/' + name, { placeholder: spec.placeholder, multiline: spec.multiline === true });
+        if (!value) return;
+        finalArgs = value;
+      }
+    }
+
+    const line = '/' + name + (finalArgs ? ' ' + finalArgs : '');
+    try {
+      const res = await sdk.api.runCommand(line);
+      // The command's own prints come back as messages; render them in the
+      // transcript instead of dropping them on the floor.
+      for (const msg of (res.messages || [])) {
+        // \`print\` produced it: a real transcript row, not a toast. \`send\` produced
+        // it: the command wanted to talk to the agent, so the server already ran
+        // the turn and the content is the prompt text.
+        if (msg && msg.role === 'user') {
+          appendUserMessage(msg.content, msg);
+        } else if (msg && msg.content) {
+          appendNotice(msg.content, msg.meta && msg.meta.error);
+        }
+      }
+      await syncState();
+    } catch (e) {
+      sdk.ui.showToast({ message: '/' + name + ': ' + e.message, type: 'error' });
+    }
   }
 
   function closeCommandPalette() {
     if (cmdPaletteModal) cmdPaletteModal.style.display = 'none';
+    paletteInPreview = false;
   }
 
   if (slashCmdBtn) slashCmdBtn.onclick = openCommandPalette;
   if (cmdPaletteCloseBtn) cmdPaletteCloseBtn.onclick = closeCommandPalette;
   if (cmdPaletteCancelBtn) cmdPaletteCancelBtn.onclick = closeCommandPalette;
-  if (cmdPaletteSearchInput) cmdPaletteSearchInput.addEventListener('input', () => renderCommandPaletteList(COMMANDS));
+  if (cmdPaletteSearchInput) cmdPaletteSearchInput.addEventListener('input', () => {
+    paletteIndex = 0;
+    renderCommandPaletteList();
+  });
+
+  if (cmdPaletteModal) {
+    cmdPaletteModal.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); movePaletteSelection(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); movePaletteSelection(-1); }
+      else if (e.key === 'Tab') {
+        e.preventDefault();
+        paletteInPreview = !paletteInPreview;
+        renderCommandPaletteList();
+        if (paletteInPreview) focusPreview();
+        else if (cmdPaletteSearchInput) cmdPaletteSearchInput.focus();
+      } else if (e.key === 'ArrowRight') {
+        paletteInPreview = true;
+        renderCommandPaletteList();
+        focusPreview();
+      } else if (e.key === 'ArrowLeft') {
+        paletteInPreview = false;
+        renderCommandPaletteList();
+        if (cmdPaletteSearchInput) cmdPaletteSearchInput.focus();
+      }
+      else if (e.key === 'Enter') {
+        // Enter on a search box would submit a filter we already applied
+        // on every keystroke; with the preview pane focused it runs instead.
+        if (paletteInPreview) {
+          e.preventDefault();
+          const runBtn = cmdPalettePreview && cmdPalettePreview.querySelector('.cmd-preview-run');
+          if (runBtn) runBtn.click();
+          return;
+        }
+        e.preventDefault();
+        executePaletteCommand(paletteFiltered[paletteIndex]);
+      } else if (e.key === 'Escape') {
+        // Esc clears the search before it closes the palette: a half-typed query
+        // that silently vanishes is the worse of the two behaviours.
+        if (cmdPaletteSearchInput && cmdPaletteSearchInput.value) {
+          e.preventDefault();
+          e.stopPropagation();
+          cmdPaletteSearchInput.value = '';
+          paletteIndex = 0;
+          renderCommandPaletteList();
+        }
+      }
+    });
+  }
 
   // --- Interactive Model Selector Modal Dialog ---
   const modelSelectorModal = document.querySelector('#model-selector-modal');
@@ -1197,46 +2064,309 @@ export const CLIENT_APP_JS = `/**
     }
   });
 
-  // --- Floating Settings Modal Dialog (Claude Code Style) ---
+// --- Settings Modal, driven entirely by the SETTINGS schema (/api/settings) ---
+  // The old version hard-coded 17 tabs of which 6 had content, and kept chat
+  // width / font / speech in localStorage — a second copy of preferences that
+  // the TUI could not see. Everything below now comes from the one table.
   const settingsModal = document.querySelector('#settings-modal');
   const openSettingsBtn = document.querySelector('#open-settings-btn');
   const settingsCloseBtn = document.querySelector('#settings-close-btn');
   const settingsSearchInput = document.querySelector('#settings-search-input');
+  const settingsNavScroll = document.querySelector('#settings-nav-scroll');
   const settingsMainContent = document.querySelector('#settings-main-content');
-  let currentSettingsTab = 'general';
 
-  const storedChatFont = localStorage.getItem('meowcode_chat_font');
-  if (storedChatFont) {
-    const fontMap = {
-      'Anthropic Serif': "ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif",
-      'Outfit': "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-      'JetBrains Mono': "'JetBrains Mono', Consolas, Monaco, monospace",
-      'system-ui': "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    };
-    document.documentElement.style.setProperty('--chat-font-family', fontMap[storedChatFont] || storedChatFont);
-  }
-  const storedChatWidth = localStorage.getItem('meowcode_chat_width');
-  if (storedChatWidth) {
-    document.documentElement.style.setProperty('--chat-max-width', storedChatWidth + 'px');
-  }
-  const storedMotion = localStorage.getItem('meowcode_motion');
-  if (storedMotion === 'reduced') {
-    document.body.classList.add('reduced-motion');
-  }
+  const FONT_STACKS = {
+    'Outfit': "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    'Anthropic Serif': "ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif",
+    'JetBrains Mono': "'JetBrains Mono', Consolas, Monaco, monospace",
+    'system-ui': '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif',
+  };
 
-  function openSettingsModal(tab = 'general') {
-    currentSettingsTab = tab;
-    if (settingsModal) {
-      settingsModal.style.display = 'flex';
-      selectSettingsTab(tab);
+  // { lang, groups: string[], settings: Array<{ key, group, type, values, min,
+  //   max, unit, surfaces, label, description, value }> } — null until loaded.
+  let settingsSchema = null;
+  let settingsQuery = '';
+  let settingsFetchSeq = 0;
+
+  async function loadSettingsSchema() {
+    // A config write triggers a refetch; if two overlap, only the newest wins,
+    // otherwise a slow earlier response can overwrite fresher values.
+    const seq = ++settingsFetchSeq;
+    try {
+      const res = await fetch('/api/settings');
+      if (res.ok && seq === settingsFetchSeq) settingsSchema = await res.json();
+    } catch (e) {
+      console.warn('Could not load the settings schema:', e);
     }
+  }
+
+  function settingRow(key) {
+    return settingsSchema ? settingsSchema.settings.find((s) => s.key === key) : null;
+  }
+
+  function settingValue(key) {
+    const row = settingRow(key);
+    return row ? row.value : undefined;
+  }
+
+  // The language setting is 'auto' | 'zh' | 'en'. 'auto' means "whatever the
+  // server's locale resolves to", which /api/settings has already done for us —
+  // it hands back a concrete lang. Fall back to the browser only on fetch failure.
+  function syncLanguageFromConfig(cfg) {
+    const bag = (cfg && cfg.settings) || {};
+    const raw = bag.language || 'auto';
+    const want = raw === 'zh' || raw === 'en' ? raw
+      : (settingsSchema && settingsSchema.lang) || sdk.i18n.getLang();
+    if (want && want !== sdk.i18n.getLang()) sdk.i18n.setLang(want);
+  }
+
+  // The settings that only make sense in a browser, applied straight to the DOM
+  // rather than persisted anywhere: CSS variables, a body class, and a flag the
+  // turn-complete handler reads for the desktop notification.
+  function applyVisualSettings() {
+    const width = settingValue('chatWidth');
+    if (width) document.documentElement.style.setProperty('--chat-max-width', width + 'px');
+    const font = settingValue('chatFont');
+    if (font && FONT_STACKS[font]) {
+      document.documentElement.style.setProperty('--chat-font-family', FONT_STACKS[font]);
+    }
+    document.body.classList.toggle('reduced-motion', settingValue('reduceMotion') === true);
+  }
+
+  async function saveSetting(key, value) {
+    const res = await sdk.api.updateConfig({ settings: { [key]: value } });
+    if (settingsSchema) {
+      const row = settingRow(key);
+      if (row) row.value = value;
+    }
+    // Turning notifications on has to happen inside the click that enabled them:
+    // the permission prompt needs the gesture, and a later programmatic call is
+    // blocked in every modern browser.
+    if (key === 'notifyTurn' && value === true && window.Notification && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+    applyVisualSettings();
+    renderSettingsPane();
+    return res;
+  }
+
+  function isWebOnly(row) {
+    return Array.isArray(row.surfaces) && row.surfaces.indexOf('web') >= 0;
+  }
+
+  // A row the TUI owns is shown but not editable here: the browser has no way to
+  // apply it, and silently hiding it would read as "this app has no such switch".
+  function isTuiOnly(row) {
+    return !Array.isArray(row.surfaces) || row.surfaces.indexOf('web') < 0;
+  }
+
+  // --- Controls (one per SettingSpec.type) ---
+
+  function booleanControl(row, disabled) {
+    const on = row.value === true;
+    return '<button type="button" class="settings-ctrl-switch' + (on ? ' active' : '') +
+      '" role="switch" aria-checked="' + on + '" data-setting="' + escapeHtml(row.key) +
+      '"' + (disabled ? ' disabled' : '') + '><span class="switch-thumb"></span></button>';
+  }
+
+  function segmentedControl(row, labels, disabled) {
+    const cur = String(row.value);
+    const btns = (row.values || []).map((v, i) =>
+      '<button type="button" class="m3-segmented-btn' + (v === cur ? ' active' : '') +
+      '" data-setting="' + escapeHtml(row.key) + '" data-value="' + escapeHtml(v) + '"' +
+      (disabled ? ' disabled' : '') + '>' + escapeHtml(labels ? labels[i] : v) + '</button>').join('');
+    return '<div class="m3-segmented-group">' + btns + '</div>';
+  }
+
+  function selectControl(row, disabled) {
+    const opts = (row.values || []).map((v) =>
+      '<option value="' + escapeHtml(v) + '"' + (String(row.value) === v ? ' selected' : '') +
+      '>' + escapeHtml(v) + '</option>').join('');
+    return '<select class="settings-ctrl-select" data-setting="' + escapeHtml(row.key) + '"' +
+      (disabled ? ' disabled' : '') + '>' + opts + '</select>';
+  }
+
+  function numberControl(row, disabled) {
+    const max = typeof row.max === 'number' ? row.max : 100;
+    const min = typeof row.min === 'number' ? row.min : 0;
+    const cur = Number(row.value) || 0;
+    if (max <= 100) {
+      // Small ranges: a stepper, because typing "37" out of context is error-prone.
+      const step = max <= 10 ? 1 : max <= 50 ? 5 : 10;
+      return '<div class="settings-ctrl-stepper"' + (disabled ? ' data-disabled="1"' : '') + '>' +
+        '<button type="button" class="stepper-btn" aria-label="−" data-setting="' + escapeHtml(row.key) +
+        '" data-delta="' + (-step) + '"' + (disabled ? ' disabled' : '') + '>−</button>' +
+        '<input class="settings-ctrl-input" type="number" value="' + cur + '" min="' + min +
+        '" max="' + max + '" step="' + step + '" data-setting="' + escapeHtml(row.key) + '"' +
+        (disabled ? ' disabled' : '') + ' aria-label="' + escapeHtml(row.label) + '" />' +
+        '<button type="button" class="stepper-btn" aria-label="+" data-setting="' + escapeHtml(row.key) +
+        '" data-delta="' + step + '"' + (disabled ? ' disabled' : '') + '>+</button>' +
+        '<span class="settings-ctrl-unit">' + escapeHtml(row.unit || '') + '</span></div>';
+    }
+    // Huge ranges (context windows in the 10^6–10^7 tokens): a stepper would take
+    // forever, so pair a number field with the sizes people actually pick.
+    const presets = [min, Math.round(max * 0.1), Math.round(max * 0.5), max]
+      .filter((n, i, a) => a.indexOf(n) === i && n >= min);
+    const chips = presets.map((n) =>
+      '<button type="button" class="settings-preset-chip' + (n === cur ? ' active' : '') +
+      '" data-setting="' + escapeHtml(row.key) + '" data-value="' + n + '"' +
+      (disabled ? ' disabled' : '') + '>' + (n === min && min === 0 ? 'Auto' : n >= 1000 ?
+        (n / 1000) + 'k' : n) + '</button>').join('');
+    return '<div class="settings-ctrl-number">' +
+      '<input class="settings-ctrl-input" type="number" value="' + cur + '" min="' + min +
+      '" max="' + max + '" data-setting="' + escapeHtml(row.key) + '"' +
+      (disabled ? ' disabled' : '') + ' aria-label="' + escapeHtml(row.label) + '" />' +
+      '<span class="settings-ctrl-unit">' + escapeHtml(row.unit || '') + '</span>' +
+      '<div class="settings-preset-row">' + chips + '</div></div>';
+  }
+
+  function stringControl(row, disabled) {
+    return '<input class="settings-ctrl-input settings-ctrl-text" type="text" value="' +
+      escapeHtml(String(row.value == null ? '' : row.value)) + '" data-setting="' +
+      escapeHtml(row.key) + '" spellcheck="false"' + (disabled ? ' disabled' : '') +
+      ' aria-label="' + escapeHtml(row.label) + '" />';
+  }
+
+  // Wide enums read better as a list of options than as three cramped segments.
+  const ENUM_LABELS = {
+    language: { auto: 'Auto', zh: '中文', en: 'English' },
+    thinkingMode: { auto: 'Auto', off: 'Off', on: 'On' },
+    outputStyle: { default: 'Default', concise: 'Concise', explanatory: 'Explanatory' },
+    permissionMode: {
+      default: 'Ask', acceptEdits: 'Accept edits', plan: 'Plan', bypassPermissions: 'Bypass',
+    },
+  };
+
+  function controlFor(row) {
+    const disabled = isTuiOnly(row);
+    if (row.type === 'boolean') return booleanControl(row, disabled);
+    if (row.type === 'enum') {
+      const labels = ENUM_LABELS[row.key];
+      const values = row.values || [];
+      // ≤3 short options fit a segmented row; more need a real dropdown.
+      if (values.length <= 3 && values.every((v) => v.length <= 14)) {
+        return segmentedControl(row, values.map((v) => (labels ? labels[v] || v : v)), disabled);
+      }
+      return selectControl(row, disabled);
+    }
+    if (row.type === 'number') return numberControl(row, disabled);
+    return stringControl(row, disabled);
+  }
+
+  // --- Rendering ---
+
+  function highlight(text, query) {
+    const safe = escapeHtml(text);
+    if (!query) return safe;
+    const needle = escapeHtml(query).toLowerCase();
+    const hay = safe.toLowerCase();
+    let out = '';
+    let at = 0;
+    for (;;) {
+      const hit = hay.indexOf(needle, at);
+      if (hit < 0) { out += safe.slice(at); break; }
+      out += safe.slice(at, hit) + '<mark class="settings-search-highlight">' + safe.slice(hit, hit + needle.length) + '</mark>';
+      at = hit + needle.length;
+    }
+    return out;
+  }
+
+  function rowHtml(row, query) {
+    const tuiOnly = isTuiOnly(row);
+    const dirty = String(row.value) !== String(row.default);
+    const tag = query && settingsSchema
+      ? '<span class="settings-group-tag">' + escapeHtml(row.group) + '</span>' : '';
+    const badges =
+      (tuiOnly ? '<span class="settings-badge settings-badge-tui">TUI</span>' : '') +
+      (isWebOnly(row) ? '<span class="settings-badge settings-badge-web">Web</span>' : '');
+    return '<div class="settings-row' + (tuiOnly ? ' is-tui-only' : '') + '" data-setting-row="' +
+      escapeHtml(row.key) + '"><div class="settings-row-info">' +
+      '<div class="settings-row-label">' + highlight(row.label, query) + badges +
+      (dirty ? '<span class="settings-badge-dirty" title="Changed from the default"></span>' : '') +
+      tag + '</div>' +
+      '<div class="settings-row-desc">' + highlight(row.description || '', query) +
+      (tuiOnly ? ' <em>' + escapeHtml(sdk.i18n.t('settings.tuiOnly.hint')) + '</em>' : '') +
+      '</div></div>' +
+      '<div class="settings-row-ctrl">' + controlFor(row) +
+      (dirty ? '<button type="button" class="settings-reset-btn" data-reset="' +
+        escapeHtml(row.key) + '" title="' + escapeHtml(sdk.i18n.t('settings.reset')) + '">↺</button>' : '') +
+      '</div></div>';
+  }
+
+  function matches(row, query) {
+    if (!query) return true;
+    const hay = (row.label + ' ' + (row.description || '') + ' ' + row.key + ' ' + row.group).toLowerCase();
+    return hay.indexOf(query) >= 0;
+  }
+
+  function renderSettingsNav(rows) {
+    if (!settingsNavScroll || !settingsSchema) return;
+    const groups = [];
+    rows.forEach((r) => { if (groups.indexOf(r.group) < 0) groups.push(r.group); });
+    settingsNavScroll.innerHTML = groups.map((g) =>
+      '<button type="button" class="settings-nav-item" data-group="' + escapeHtml(g) + '">' +
+      '<span class="material-symbols-outlined nav-item-icon">tune</span>' +
+      '<span class="nav-item-text">' + escapeHtml(g) + '</span></button>').join('');
+  }
+
+  function renderSettingsPane() {
+    if (!settingsMainContent) return;
+    if (!settingsSchema) {
+      settingsMainContent.innerHTML =
+        '<div class="settings-row-desc">' + escapeHtml(sdk.i18n.t('settings.loading')) + '</div>';
+      return;
+    }
+    const query = settingsQuery.trim().toLowerCase();
+    const all = settingsSchema.settings;
+    const rows = all.filter((r) => matches(r, query));
+    const hits = rows.length;
+
+    const sections = [];
+    settingsSchema.groups.forEach((group) => {
+      const inGroup = rows.filter((r) => r.group === group);
+      if (inGroup.length === 0) return;
+      sections.push('<section class="settings-section-block" data-group-section="' +
+        escapeHtml(group) + '"><div class="settings-section-header">' +
+        escapeHtml(group) + '</div>' + inGroup.map((r) => rowHtml(r, query)).join('') + '</section>');
+    });
+
+    const footer = query
+      ? '<div class="settings-search-count">' + escapeHtml(sdk.i18n.t('settings.searchCount', { n: hits })) + '</div>'
+      : '<div class="settings-search-count">' + escapeHtml(sdk.i18n.t('settings.footerHint')) + '</div>';
+
+    settingsMainContent.innerHTML =
+      (sections.length ? sections.join('') :
+        '<div class="settings-row-desc">' + escapeHtml(sdk.i18n.t('settings.noResults')) + '</div>') + footer;
+
+    renderSettingsNav(rows);
+    if (!query) markActiveGroup(settingsMainContent.scrollTop);
+  }
+
+  // Scrollspy: the nav highlights whichever group's heading owns the top of the
+  // viewport, so a 53-row pane stays navigable without a second click.
+  function markActiveGroup(scrollTop) {
+    if (!settingsMainContent || !settingsNavScroll) return;
+    let active = '';
+    settingsMainContent.querySelectorAll('[data-group-section]').forEach((sec) => {
+      if (sec.offsetTop - settingsMainContent.offsetTop <= scrollTop + 24) active = sec.getAttribute('data-group-section');
+    });
+    settingsNavScroll.querySelectorAll('.settings-nav-item').forEach((item) => {
+      item.classList.toggle('active', item.getAttribute('data-group') === active);
+    });
+  }
+
+  function openSettingsModal() {
+    if (settingsModal) settingsModal.style.display = 'flex';
+    applyVisualSettings();
+    renderSettingsPane();
+    if (settingsSearchInput && settingsMainContent) settingsSearchInput.focus();
   }
 
   function closeSettingsModal() {
     if (settingsModal) settingsModal.style.display = 'none';
   }
 
-  if (openSettingsBtn) openSettingsBtn.onclick = () => openSettingsModal('general');
+  if (openSettingsBtn) openSettingsBtn.onclick = openSettingsModal;
   if (settingsCloseBtn) settingsCloseBtn.onclick = closeSettingsModal;
   if (settingsModal) {
     settingsModal.addEventListener('click', (e) => {
@@ -1244,358 +2374,82 @@ export const CLIENT_APP_JS = `/**
     });
   }
 
-  document.querySelectorAll('.settings-nav-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const tab = item.getAttribute('data-tab');
-      if (tab) selectSettingsTab(tab);
-    });
-  });
-
-  function selectSettingsTab(tab) {
-    currentSettingsTab = tab;
-    document.querySelectorAll('.settings-nav-item').forEach(item => {
-      item.classList.toggle('active', item.getAttribute('data-tab') === tab);
-    });
-    renderSettingsContent(tab);
-  }
-
   if (settingsSearchInput) {
     settingsSearchInput.addEventListener('input', (e) => {
-      const q = e.target.value.trim().toLowerCase();
-      document.querySelectorAll('.settings-nav-item').forEach(item => {
-        const text = item.textContent.toLowerCase();
-        item.style.display = (!q || text.includes(q)) ? 'flex' : 'none';
-      });
-      document.querySelectorAll('.settings-row').forEach(row => {
-        const text = row.textContent.toLowerCase();
-        row.style.display = (!q || text.includes(q)) ? 'flex' : 'none';
-      });
+      settingsQuery = e.target.value || '';
+      renderSettingsPane();
+      if (settingsMainContent) settingsMainContent.scrollTop = 0;
     });
   }
 
-  function renderSettingsContent(tab) {
-    if (!settingsMainContent) return;
-    const t = sdk.i18n ? sdk.i18n.t : (k) => k;
-    const currentLang = sdk.i18n ? sdk.i18n.getLang() : 'zh';
-    const currentTheme = sdk.theme.getTheme();
-    const currentChatWidth = localStorage.getItem('meowcode_chat_width') || '860';
-    const currentChatFont = localStorage.getItem('meowcode_chat_font') || 'Outfit';
-    const currentMotion = localStorage.getItem('meowcode_motion') || 'system';
-    const currentVoiceStyle = localStorage.getItem('meowcode_speech_style') || 'soft';
-    const currentVoiceSpeed = localStorage.getItem('meowcode_speech_speed') || 'normal';
-    const notifyTurn = localStorage.getItem('meowcode_notify_turn') !== 'false';
-
-    if (tab === 'general') {
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">\${t('settings.appearance.title')}</div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.appearance.theme')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <div class="m3-segmented-group" id="settings-theme-group">
-                <button class="m3-segmented-btn \${currentTheme === 'system' ? 'active' : ''}" data-theme="system" title="\${t('settings.appearance.theme.system')}">
-                  <span class="material-symbols-outlined" style="font-size:16px;">desktop_windows</span>
-                </button>
-                <button class="m3-segmented-btn \${currentTheme === 'light' ? 'active' : ''}" data-theme="light" title="\${t('settings.appearance.theme.light')}">
-                  <span class="material-symbols-outlined" style="font-size:16px;">light_mode</span>
-                </button>
-                <button class="m3-segmented-btn \${currentTheme === 'dark' ? 'active' : ''}" data-theme="dark" title="\${t('settings.appearance.theme.dark')}">
-                  <span class="material-symbols-outlined" style="font-size:16px;">dark_mode</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.appearance.font')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <select class="m3-select" id="settings-font-select">
-                <option value="Anthropic Serif" \${currentChatFont === 'Anthropic Serif' ? 'selected' : ''}>Anthropic Serif</option>
-                <option value="Outfit" \${currentChatFont === 'Outfit' ? 'selected' : ''}>Outfit / Inter</option>
-                <option value="JetBrains Mono" \${currentChatFont === 'JetBrains Mono' ? 'selected' : ''}>JetBrains Mono</option>
-                <option value="system-ui" \${currentChatFont === 'system-ui' ? 'selected' : ''}>System Sans</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.appearance.chatWidth')}</div>
-              <div class="settings-row-desc">\${t('settings.appearance.chatWidth.desc')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <div class="m3-segmented-group" id="settings-width-group">
-                <button class="m3-segmented-btn \${currentChatWidth === '640' ? 'active' : ''}" data-width="640">\${t('settings.appearance.chatWidth.narrow')}</button>
-                <button class="m3-segmented-btn \${currentChatWidth === '860' ? 'active' : ''}" data-width="860">\${t('settings.appearance.chatWidth.medium')}</button>
-                <button class="m3-segmented-btn \${currentChatWidth === '1200' ? 'active' : ''}" data-width="1200">\${t('settings.appearance.chatWidth.wide')}</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.appearance.motion')}</div>
-              <div class="settings-row-desc">\${t('settings.appearance.motion.desc')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <div class="m3-segmented-group" id="settings-motion-group">
-                <button class="m3-segmented-btn \${currentMotion === 'system' ? 'active' : ''}" data-motion="system">\${t('settings.appearance.motion.system')}</button>
-                <button class="m3-segmented-btn \${currentMotion === 'reduced' ? 'active' : ''}" data-motion="reduced">\${t('settings.appearance.motion.reduced')}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="settings-section-block">
-          <div class="settings-section-header">\${t('settings.voice.title')}</div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.voice.language')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <select class="m3-select" id="settings-lang-select">
-                <option value="zh" \${currentLang === 'zh' ? 'selected' : ''}>\${t('settings.voice.language.zh')}</option>
-                <option value="en" \${currentLang === 'en' ? 'selected' : ''}>\${t('settings.voice.language.en')}</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.voice.style')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <select class="m3-select" id="settings-style-select">
-                <option value="soft" \${currentVoiceStyle === 'soft' ? 'selected' : ''}>\${t('settings.voice.style.soft')}</option>
-                <option value="professional" \${currentVoiceStyle === 'professional' ? 'selected' : ''}>\${t('settings.voice.style.professional')}</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.voice.speed')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <select class="m3-select" id="settings-speed-select">
-                <option value="normal" \${currentVoiceSpeed === 'normal' ? 'selected' : ''}>\${t('settings.voice.speed.normal')}</option>
-                <option value="fast" \${currentVoiceSpeed === 'fast' ? 'selected' : ''}>\${t('settings.voice.speed.fast')}</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        <div class="settings-section-block">
-          <div class="settings-section-header">\${t('settings.notification.title')}</div>
-
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${t('settings.notification.turnDone')}</div>
-              <div class="settings-row-desc">\${t('settings.notification.turnDone.desc')}</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <button class="m3-switch \${notifyTurn ? 'active' : ''}" id="settings-notify-switch" role="switch" aria-checked="\${notifyTurn}">
-                <div class="switch-thumb"></div>
-              </button>
-            </div>
-          </div>
-        </div>
-      \`;
-
-      document.querySelectorAll('#settings-theme-group .m3-segmented-btn').forEach(btn => {
-        btn.onclick = () => {
-          const m = btn.getAttribute('data-theme');
-          sdk.theme.setTheme(m);
-          document.querySelectorAll('#settings-theme-group .m3-segmented-btn').forEach(b => b.classList.toggle('active', b === btn));
-        };
-      });
-
-      const fontSelect = document.querySelector('#settings-font-select');
-      if (fontSelect) {
-        fontSelect.onchange = () => {
-          const f = fontSelect.value;
-          localStorage.setItem('meowcode_chat_font', f);
-          const fontMap = {
-            'Anthropic Serif': "ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif",
-            'Outfit': "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-            'JetBrains Mono': "'JetBrains Mono', Consolas, Monaco, monospace",
-            'system-ui': "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-          };
-          document.documentElement.style.setProperty('--chat-font-family', fontMap[f] || f);
-          sdk.ui.showToast({ message: 'Font: ' + f, type: 'info' });
-        };
-      }
-
-      document.querySelectorAll('#settings-width-group .m3-segmented-btn').forEach(btn => {
-        btn.onclick = () => {
-          const w = btn.getAttribute('data-width');
-          localStorage.setItem('meowcode_chat_width', w);
-          document.documentElement.style.setProperty('--chat-max-width', w + 'px');
-          document.querySelectorAll('#settings-width-group .m3-segmented-btn').forEach(b => b.classList.toggle('active', b === btn));
-          sdk.ui.showToast({ message: 'Chat width: ' + w + 'px', type: 'info' });
-        };
-      });
-
-      document.querySelectorAll('#settings-motion-group .m3-segmented-btn').forEach(btn => {
-        btn.onclick = () => {
-          const m = btn.getAttribute('data-motion');
-          localStorage.setItem('meowcode_motion', m);
-          document.body.classList.toggle('reduced-motion', m === 'reduced');
-          document.querySelectorAll('#settings-motion-group .m3-segmented-btn').forEach(b => b.classList.toggle('active', b === btn));
-        };
-      });
-
-      const langSelect = document.querySelector('#settings-lang-select');
-      if (langSelect) {
-        langSelect.onchange = () => {
-          const l = langSelect.value;
-          sdk.i18n.setLang(l);
-          sdk.ui.showToast({ message: l === 'zh' ? '已切换至中文' : 'Switched to English', type: 'info' });
-        };
-      }
-
-      const styleSelect = document.querySelector('#settings-style-select');
-      if (styleSelect) styleSelect.onchange = () => localStorage.setItem('meowcode_speech_style', styleSelect.value);
-      const speedSelect = document.querySelector('#settings-speed-select');
-      if (speedSelect) speedSelect.onchange = () => localStorage.setItem('meowcode_speech_speed', speedSelect.value);
-
-      const notifySwitch = document.querySelector('#settings-notify-switch');
-      if (notifySwitch) {
-        notifySwitch.onclick = () => {
-          const active = notifySwitch.classList.toggle('active');
-          notifySwitch.setAttribute('aria-checked', String(active));
-          localStorage.setItem('meowcode_notify_turn', String(active));
-          if (active && window.Notification && Notification.permission !== 'granted') {
-            Notification.requestPermission();
-          }
-        };
-      }
-    } else if (tab === 'meowcode') {
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">Claude Code / MeowCode Engine</div>
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">Default Model</div>
-              <div class="settings-row-desc">Autonomous agent model used for reasoning and multi-turn loops.</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <select class="m3-select" id="settings-model-choice">
-                <option value="claude-opus-4-8" selected>claude-opus-4-8</option>
-                <option value="claude-3-7-sonnet">claude-3-7-sonnet</option>
-                <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                <option value="gpt-4o">gpt-4o</option>
-              </select>
-            </div>
-          </div>
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">Thinking Budget</div>
-              <div class="settings-row-desc">Extended reasoning and self-healing trace budget.</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <span class="badge" style="font-size:12px;padding:4px 10px;background:var(--md-sys-color-primary-container);color:var(--md-sys-color-on-primary-container);border-radius:var(--md-shape-full);">Adaptive (Auto)</span>
-            </div>
-          </div>
-        </div>
-      \`;
-    } else if (tab === 'system' || tab === 'developer') {
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">\${tab === 'system' ? 'System Environment' : 'Developer Console'}</div>
-          <div class="settings-row">
-            <div class="settings-row-info"><div class="settings-row-label">Harness Repository</div></div>
-            <div class="settings-row-ctrl"><code style="font-family:var(--font-family-code);font-size:12px;">harmess (git:main)</code></div>
-          </div>
-          <div class="settings-row">
-            <div class="settings-row-info"><div class="settings-row-label">Runtime</div></div>
-            <div class="settings-row-ctrl"><code style="font-family:var(--font-family-code);font-size:12px;">Node.js / Bun on Linux</code></div>
-          </div>
-          <div class="settings-row">
-            <div class="settings-row-info"><div class="settings-row-label">WebUI Port</div></div>
-            <div class="settings-row-ctrl"><code style="font-family:var(--font-family-code);font-size:12px;">\${window.location.port || '4040'}</code></div>
-          </div>
-        </div>
-      \`;
-    } else if (tab === 'plugins' || tab === 'extensions') {
-      const panels = sdk.panels.getPanels();
-      const panelsList = panels.map(p => \`
-        <div class="settings-row">
-          <div class="settings-row-info">
-            <div class="settings-row-label">\${escapeHtml(p.title)}</div>
-            <div class="settings-row-desc">Panel ID: \${escapeHtml(p.id)}</div>
-          </div>
-          <div class="settings-row-ctrl">
-            <span class="badge" style="font-size:11px;padding:3px 8px;background:var(--md-sys-color-secondary-container);color:var(--md-sys-color-on-secondary-container);border-radius:var(--md-shape-full);">Active</span>
-          </div>
-        </div>
-      \`).join('');
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">Loaded Plugins & Extensions</div>
-          \${panelsList || '<div class="text-dim text-xs">No extra panels loaded</div>'}
-        </div>
-      \`;
-    } else if (tab === 'skills') {
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">Skills Customizations</div>
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">agy-customizations</div>
-              <div class="settings-row-desc">Customizations system, skills, rules, and plugins manager.</div>
-            </div>
-            <div class="settings-row-ctrl"><span class="badge" style="font-size:11px;padding:3px 8px;background:var(--md-sys-color-primary-container);color:var(--md-sys-color-on-primary-container);border-radius:var(--md-shape-full);">Loaded</span></div>
-          </div>
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">antigravity-guide</div>
-              <div class="settings-row-desc">Antigravity CLI and IDE comprehensive developer guide.</div>
-            </div>
-            <div class="settings-row-ctrl"><span class="badge" style="font-size:11px;padding:3px 8px;background:var(--md-sys-color-primary-container);color:var(--md-sys-color-on-primary-container);border-radius:var(--md-shape-full);">Loaded</span></div>
-          </div>
-        </div>
-      \`;
-    } else if (tab === 'connectors') {
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">Connectors (MCP Servers)</div>
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">Model Context Protocol (MCP)</div>
-              <div class="settings-row-desc">Standard protocol for connecting external toolsets and resource servers.</div>
-            </div>
-            <div class="settings-row-ctrl"><span class="badge" style="font-size:11px;padding:3px 8px;background:var(--md-sys-color-surface-container-high);border-radius:var(--md-shape-full);">Ready</span></div>
-          </div>
-        </div>
-      \`;
-    } else {
-      settingsMainContent.innerHTML = \`
-        <div class="settings-section-block">
-          <div class="settings-section-header">\${tab.charAt(0).toUpperCase() + tab.slice(1)}</div>
-          <div class="settings-row">
-            <div class="settings-row-info">
-              <div class="settings-row-label">\${tab.charAt(0).toUpperCase() + tab.slice(1)} Configuration</div>
-              <div class="settings-row-desc">Manage preferences, sync states, and defaults for this workspace.</div>
-            </div>
-            <div class="settings-row-ctrl">
-              <span class="badge" style="font-size:11px;padding:3px 8px;background:var(--md-sys-color-surface-container-high);border-radius:var(--md-shape-full);">Configured</span>
-            </div>
-          </div>
-        </div>
-      \`;
-    }
+  if (settingsNavScroll) {
+    settingsNavScroll.addEventListener('click', (e) => {
+      const item = e.target.closest('.settings-nav-item');
+      if (!item || !settingsMainContent) return;
+      const sec = settingsMainContent.querySelector('[data-group-section="' +
+        CSS.escape(item.getAttribute('data-group')) + '"]');
+      if (sec) settingsMainContent.scrollTo({ top: sec.offsetTop - settingsMainContent.offsetTop, behavior: 'smooth' });
+    });
   }
 
+  if (settingsMainContent) {
+    settingsMainContent.addEventListener('scroll', () => {
+      if (!settingsQuery) markActiveGroup(settingsMainContent.scrollTop);
+    });
+  }
+
+  // One delegated handler for every control the renderer can emit.
+  if (settingsMainContent) {
+    settingsMainContent.addEventListener('click', async (e) => {
+      const reset = e.target.closest('[data-reset]');
+      if (reset) {
+        const row = settingRow(reset.getAttribute('data-reset'));
+        if (row) await saveSetting(row.key, row.default);
+        return;
+      }
+      const btn = e.target.closest('[data-setting]');
+      if (!btn || btn.disabled) return;
+      const row = settingRow(btn.getAttribute('data-setting'));
+      if (!row) return;
+      if (btn.classList.contains('stepper-btn')) {
+        const delta = Number(btn.getAttribute('data-delta')) || 0;
+        const min = typeof row.min === 'number' ? row.min : 0;
+        const max = typeof row.max === 'number' ? row.max : Number.MAX_SAFE_INTEGER;
+        await saveSetting(row.key, Math.min(max, Math.max(min, Number(row.value) + delta)));
+        return;
+      }
+      if (btn.tagName === 'BUTTON') {
+        if (btn.classList.contains('settings-preset-chip')) {
+          await saveSetting(row.key, Number(btn.getAttribute('data-value')));
+        } else if (btn.classList.contains('settings-ctrl-switch')) {
+          await saveSetting(row.key, !row.value);
+        } else {
+          // Segmented buttons and preset chips both carry the value.
+          await saveSetting(row.key, btn.getAttribute('data-value'));
+        }
+      }
+    });
+
+    settingsMainContent.addEventListener('change', (e) => {
+      const el = e.target.closest('[data-setting]');
+      if (!el || el.tagName === 'BUTTON' || el.disabled) return;
+      const row = settingRow(el.getAttribute('data-setting'));
+      if (!row) return;
+      const raw = el.value;
+      const value = row.type === 'number' ? Number(raw) : row.type === 'boolean' ? raw === 'true' : raw;
+      saveSetting(row.key, value);
+    });
+  }
+
+  sdk.on('config:changed', () => {
+    if (settingsModal && settingsModal.style.display !== 'none') renderSettingsPane();
+  });
+
   sdk.on('i18n:change', () => {
+    // The settings schema comes back localized, so a language switch re-renders
+    // the open pane from a fresh fetch rather than re-translating stale labels.
     if (settingsModal && settingsModal.style.display !== 'none') {
-      renderSettingsContent(currentSettingsTab);
+      loadSettingsSchema().then(renderSettingsPane);
     }
     loadSessionList();
     if (agentActivityStatus) {
@@ -1871,6 +2725,9 @@ export const CLIENT_APP_JS = `/**
       messages = st.messages || [];
       appConfig = st.config || {};
       currentUsage = st.usage || { inputTokens: 0, outputTokens: 0, toolCalls: 0, turns: 0 };
+      // Language is a shared setting, not a browser preference: 'auto' follows
+      // the server's shell locale so a remote browser sees the host's language.
+      syncLanguageFromConfig(appConfig);
       setRunningState(Boolean(st.isRunning));
       renderExistingMessages(messages);
       sdk.emit('usage:update', currentUsage);
@@ -1889,6 +2746,13 @@ export const CLIENT_APP_JS = `/**
       connectionStatus.textContent = sdk.i18n.t('statusbar.connected');
       connectionStatus.style.color = 'var(--md-sys-color-primary)';
       sdk.emit('connection:open');
+      // A permission prompt raised while the stream was down was broadcast to
+      // nobody, so it never reached openPermissionDialog — the turn would sit
+      // parked for the full INTERACTION_TIMEOUT_MS with no dialog to answer it.
+      // Polling /api/interaction on (re)connect is what recovers those; the server
+      // marks each prompt as re-broadcast exactly once, so tabs already showing it
+      // do not get a duplicate dialog.
+      catchUpInteractions();
     };
 
     sse.onerror = () => {
@@ -1901,6 +2765,9 @@ export const CLIENT_APP_JS = `/**
       try {
         const payload = JSON.parse(e.data);
         const ev = payload.event;
+        // Any non-retry event means the request is moving again — drop the
+        // transient retry notice so it doesn't linger (mirrors useChat).
+        if (ev.type !== 'retry') clearRetryNotice();
         sdk.emit('agent:event', ev);
 
         if (ev.type === 'thinking') {
@@ -1915,6 +2782,12 @@ export const CLIENT_APP_JS = `/**
           currentUsage.inputTokens += ev.inputTokens || 0;
           currentUsage.outputTokens += ev.outputTokens || 0;
           sdk.emit('usage:update', currentUsage);
+        } else if (ev.type === 'retry') {
+          appendRetryNotice(ev);
+        } else if (ev.type === 'workflow') {
+          updateWorkflowView(ev.snap);
+        } else if (ev.type === 'agent') {
+          updateAgentView(ev.snap);
         } else if (ev.type === 'error') {
           sdk.ui.showToast({ message: ev.message, type: 'error' });
         }
@@ -1929,12 +2802,65 @@ export const CLIENT_APP_JS = `/**
     });
 
     sse.addEventListener('turn:end', () => {
+      clearRetryNotice();
+      closeStaleInteractions();
+      seenSubagents = [];
+      renderAgentList([], null, 'agent');
       setRunningState(false);
+      // Re-read the transcript, not just the session list: a turn that failed
+      // mid-flight appended its system error row to the bridge's messages after
+      // the last agent:event, so without this the failure is never rendered —
+      // the toast is gone and the transcript looks like the turn succeeded.
+      syncState();
       loadSessionList();
+      announce(sdk.i18n.t('a11y.turnDone'));
+      if (settingValue('notifyTurn') === true && window.Notification && Notification.permission === 'granted') {
+        try {
+          new Notification(sdk.i18n.t('settings.notifyDone.title'), {
+            body: sdk.i18n.t('settings.notifyDone.body'),
+            tag: 'meowcode-turn',
+          });
+        } catch (e) {
+          console.warn('Turn notification failed:', e);
+        }
+      }
     });
 
     sse.addEventListener('session:state', () => {
       syncState();
+    });
+
+    sse.addEventListener('config:update', (e) => {
+      // Another tab or a plugin changed the config server-side; adopt it so the
+      // model chip, theme and settings pane don't drift apart.
+      try {
+        const cfg = JSON.parse(e.data);
+        if (cfg && typeof cfg === 'object') applyRemoteConfig(cfg);
+      } catch (_) {}
+      sdk.emit('config:update');
+    });
+
+    sse.addEventListener('interaction:request', (e) => {
+      try {
+        const req = JSON.parse(e.data);
+        showInteraction(req);
+      } catch (err) {
+        console.error('Error handling SSE interaction:request', err);
+      }
+    });
+
+    sse.addEventListener('interaction:settled', (e) => {
+      // The server gives up on a prompt the turn already walked away from (a
+      // timeout, an abort, a failed wait). Until it said so, this tab kept the
+      // dialog on screen and re-opened it on every poll of /api/interaction,
+      // because a pending prompt is indistinguishable from an answerable one.
+      try {
+        const data = JSON.parse(e.data);
+        const close = data && data.id ? openInteractionDialogs.get(data.id) : null;
+        if (close) { close(); openInteractionDialogs.delete(data.id); }
+      } catch (err) {
+        console.error('Error handling SSE interaction:settled', err);
+      }
     });
 
     sse.addEventListener('plugin:event', (e) => {
@@ -1945,10 +2871,277 @@ export const CLIENT_APP_JS = `/**
     });
   }
 
+  // --- Interaction dialogs (permission prompt + ask_user) ---
+  // The bridge raises these mid-turn and parks the turn until an answer arrives
+  // (see the interaction broker in server.ts). They are the WebUI counterpart of
+  // the TUI's PermissionDialog / AskUserDialog: without them the WebUI could only
+  // ever run in bypass mode.
+
+  const openInteractionDialogs = new Map();
+
+  // Prompts already on screen. The server re-broadcasts everything still parked
+  // whenever a client asks (see /api/interaction), which is what lets a reconnecting
+  // tab or a second tab answer a prompt it never saw — but it also means this
+  // handler can see the same prompt twice, and a second dialog for an id already
+  // on screen would leave two live buttons settling one promise. The map is the
+  // dedupe; it already has to exist to drop stale dialogs at end of turn.
+  function showInteraction(req) {
+    if (!req || !req.id) return;
+    if (openInteractionDialogs.has(req.id)) return;
+    if (req.kind === 'permission') openPermissionDialog(req);
+    else if (req.kind === 'userInput') openAskUserDialog(req);
+  }
+
+  // Pull prompts that were raised while this tab had no stream. The server's list
+  // is the authority; the per-id dedupe above is what makes re-polling cheap.
+  async function catchUpInteractions() {
+    try {
+      await sdk.api.pendingInteractions();
+    } catch (e) {
+      console.warn('Could not read pending interactions:', e);
+    }
+  }
+
+  function settleInteraction(id, response) {
+    const close = openInteractionDialogs.get(id);
+    openInteractionDialogs.delete(id);
+    if (close) close();
+    sdk.api.respondInteraction(id, response).catch((e) => {
+      // 409 means another tab answered first. The turn moves on either way, so
+      // this is a note, not an error the user needs to act on.
+      console.warn('Interaction response failed:', e && e.status ? e.status : e);
+    });
+  }
+
+  // The turn is over — an unanswered prompt can no longer be answered, so drop
+  // any dialog still on screen instead of leaving a dead button behind.
+  function closeStaleInteractions() {
+    for (const close of openInteractionDialogs.values()) close();
+    openInteractionDialogs.clear();
+  }
+
+  function openPermissionDialog(req) {
+    const close = sdk.ui.showModal({
+      title: sdk.i18n.t('modal.permission.title'),
+      width: '520px',
+      cancelText: sdk.i18n.t('modal.permission.deny'),
+      confirmText: sdk.i18n.t('modal.permission.allow'),
+      content:
+        '<div class="interaction-tool">' +
+        '<span class="material-symbols-outlined">build</span>' +
+        '<code>' + escapeHtml(req.tool) + '</code></div>' +
+        '<div class="interaction-summary">' + escapeHtml(req.summary || '') + '</div>' +
+        '<pre class="interaction-input">' + escapeHtml(JSON.stringify(req.input, null, 2)) + '</pre>',
+      // Deny is the safe default focus (and Esc), matching the TUI.
+      onCancel: () => settleInteraction(req.id, { decision: 'deny' }),
+      onConfirm: () => settleInteraction(req.id, { decision: 'allow' }),
+    });
+    openInteractionDialogs.set(req.id, close);
+  }
+
+  function openAskUserDialog(req) {
+    const answers = new Array(req.questions.length).fill(null);
+    const wrap = document.createElement('div');
+    wrap.className = 'ask-user-questions';
+
+    req.questions.forEach((q, qi) => {
+      const block = document.createElement('div');
+      block.className = 'ask-user-question';
+
+      const head = document.createElement('div');
+      head.className = 'ask-user-head';
+      head.innerHTML =
+        '<span class="ask-user-chip">' + escapeHtml(q.header || '') + '</span>' +
+        '<span class="ask-user-question-text">' + escapeHtml(q.question || '') + '</span>';
+      block.appendChild(head);
+
+      const list = document.createElement('div');
+      list.className = 'ask-user-options';
+      const picks = [];
+
+      const rowFor = (label, description, isOther) => {
+        const row = document.createElement('label');
+        row.className = 'ask-user-option';
+        const input = document.createElement('input');
+        input.type = q.multiSelect ? 'checkbox' : 'radio';
+        input.name = 'ask-user-' + qi;
+        input.className = 'ask-user-radio';
+        const text = document.createElement('span');
+        text.className = 'ask-user-option-text';
+        text.textContent = label;
+        row.appendChild(input);
+        row.appendChild(text);
+        if (description) {
+          const desc = document.createElement('span');
+          desc.className = 'ask-user-option-desc';
+          desc.textContent = description;
+          row.appendChild(desc);
+        }
+        const sync = () => {
+          if (!q.multiSelect) {
+            picks.length = 0;
+            list.querySelectorAll('input').forEach((el) => { el.checked = false; });
+            if (input.checked) picks.push(label);
+          } else {
+            const at = picks.indexOf(label);
+            if (input.checked && at < 0) picks.push(label);
+            if (!input.checked && at >= 0) picks.splice(at, 1);
+          }
+          answers[qi] = picks.slice();
+        };
+        input.addEventListener('change', sync);
+        if (isOther) {
+          const free = document.createElement('input');
+          free.type = 'text';
+          free.className = 'ask-user-other';
+          free.placeholder = sdk.i18n.t('modal.askUser.other');
+          free.addEventListener('input', () => {
+            answers[qi] = free.value.trim() ? [free.value.trim()] : picks.slice();
+          });
+          row.appendChild(free);
+        }
+        return row;
+      };
+
+      (q.options || []).forEach((o) => list.appendChild(rowFor(o.label, o.description, false)));
+      list.appendChild(rowFor(sdk.i18n.t('modal.askUser.other'), '', true));
+      block.appendChild(list);
+      wrap.appendChild(block);
+    });
+
+    const close = sdk.ui.showModal({
+      title: sdk.i18n.t('modal.askUser.title'),
+      width: '620px',
+      cancelText: sdk.i18n.t('common.cancel'),
+      confirmText: sdk.i18n.t('modal.askUser.submit'),
+      content: wrap,
+      onCancel: () => settleInteraction(req.id, { answers: [], cancelled: true }),
+      onConfirm: () => settleInteraction(req.id, { answers: answers.map((a) => a || []) }),
+    });
+    openInteractionDialogs.set(req.id, close);
+  }
+
+  function applyRemoteConfig(cfg) {
+    appConfig = cfg;
+    syncLanguageFromConfig(cfg);
+    // The schema is now stale (values and labels both moved), so refetch it
+    // before re-rendering the pane rather than patching rows one at a time.
+    loadSettingsSchema().then(() => {
+      applyVisualSettings();
+      renderSettingsPane();
+    });
+    const model = cfg && cfg.model;
+    const headerModelName = document.querySelector('.model-name');
+    if (headerModelName && model) headerModelName.textContent = model;
+    const wsModalModel = document.querySelector('#ws-modal-model');
+    if (wsModalModel && model) wsModalModel.textContent = model;
+    renderModelSelectorList();
+    renderAllSlots();
+    sdk.emit('config:changed', cfg);
+  }
+
+  // --- Screen-reader announcements ---
+  // One polite region for the whole app. Only milestones are spoken: a live
+  // region fed every streamed token would talk over the user, and clearing it
+  // between utterances is what makes a repeat of the same sentence re-announce.
+  const liveAnnouncer = document.querySelector('#meow-live-announcer');
+  function announce(text) {
+    if (!liveAnnouncer || !text) return;
+    liveAnnouncer.textContent = '';
+    // A tick's gap is enough: setting identical text twice in one task is a
+    // mutation the assistive tech may collapse into no change at all.
+    setTimeout(() => { liveAnnouncer.textContent = text; }, 50);
+  }
+  sdk.on('toast', ({ message, type }) => {
+    if (type === 'error') announce(message);
+  });
+
+  // --- Auth gate ---
+  // The server guards every /api/* with a per-process token. The happy path is
+  // silent (the URL fragment is spent for a cookie on load); this only appears
+  // when there is no credential — a hand-typed http://localhost:4040, or a
+  // fragment that has already been consumed and whose cookie was dropped.
+  function renderAuthGate() {
+    const wrap = document.createElement('div');
+    wrap.id = 'auth-gate';
+    wrap.className = 'auth-gate';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.setAttribute('aria-labelledby', 'auth-gate-title');
+    wrap.innerHTML = \`
+      <div class="auth-gate-card">
+        <div class="auth-gate-icon"><span class="material-symbols-outlined">lock</span></div>
+        <h2 id="auth-gate-title" class="auth-gate-title">\${sdk.i18n.t('auth.gate.title')}</h2>
+        <p class="auth-gate-desc">\${sdk.i18n.t('auth.gate.desc')}</p>
+        <form id="auth-gate-form" class="auth-gate-form">
+          <input type="password" id="auth-gate-input" class="auth-gate-input" autocomplete="off"
+                 spellcheck="false" placeholder="\${sdk.i18n.t('auth.gate.placeholder')}" aria-label="Token" />
+          <button type="submit" class="m3-action-btn m3-btn-filled">\${sdk.i18n.t('auth.gate.submit')}</button>
+        </form>
+        <p id="auth-gate-error" class="auth-gate-error" role="alert"></p>
+        <p class="auth-gate-hint">\${sdk.i18n.t('auth.gate.hint')}</p>
+      </div>
+    \`;
+    document.body.appendChild(wrap);
+
+    const form = wrap.querySelector('#auth-gate-form');
+    const input = wrap.querySelector('#auth-gate-input');
+    const error = wrap.querySelector('#auth-gate-error');
+    input.focus();
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      error.textContent = '';
+      const ok = await sdk.auth.submit(input.value);
+      if (!ok) {
+        error.textContent = sdk.i18n.t('auth.gate.badToken');
+        input.select();
+        return;
+      }
+      wrap.remove();
+      boot();
+    });
+  }
+
+  // A standing reminder that this server is deliberately unprotected. Loud on
+  // purpose: --no-auth hands the agent to anyone who can reach the port.
+  function renderAuthBanner() {
+    const st = sdk.auth.state;
+    if (!st.bypass) return;
+    const bar = document.createElement('div');
+    bar.id = 'auth-bypass-banner';
+    bar.className = 'auth-bypass-banner';
+    bar.setAttribute('role', 'status');
+    bar.innerHTML = \`
+      <span class="material-symbols-outlined auth-banner-icon">warning</span>
+      <span class="auth-banner-text">\${sdk.i18n.t('auth.bypass')}</span>
+    \`;
+    const header = document.querySelector('.app-header');
+    if (header && header.parentNode) header.parentNode.insertBefore(bar, header.nextSibling);
+  }
+
+  function boot() {
+    connectSSE();
+    void syncState();
+    // The palette is populated from GET /api/commands, so the rows are only there
+    // once that resolves. Opening the palette first is why it used to show five
+    // hardcoded rows and nothing else: nothing had ever asked for the list.
+    void loadPaletteCommands();
+  }
+
   // --- Init ---
   window.addEventListener('DOMContentLoaded', async () => {
-    connectSSE();
-    await syncState();
+    const authState = await sdk.auth.ready;
+    if (!authState.authenticated) {
+      renderAuthGate();
+      return;
+    }
+    renderAuthBanner();
+    // The settings schema decides the pane's shape, so fetch it before anything
+    // reads a setting — applyVisualSettings() runs off these values.
+    await loadSettingsSchema();
+    applyVisualSettings();
+    boot();
   });
 })();
 `

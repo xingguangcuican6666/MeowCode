@@ -173,10 +173,13 @@ src/
   webui/                the built-in WebUI front-end & Extension SDK
     index.ts            startWebUI, createWebUIServer, exports
     server.ts           HTTP & SSE server (node:http, zero external dependencies)
+    security.ts         per-process token + cookie + origin allowlist
     agent-bridge.ts     headless agent execution bridge
-    plugin-manager.ts   backend plugin manager & extension route dispatcher
+    plugin-manager.ts   backend plugin manager, extension route dispatcher,
+                        external-plugin discovery seam
     plugins/            showcase plugins: workspace-files, tools-inspector, prompt-templates, metrics-monitor
-    client/             SPA HTML layout, Vanilla CSS design system, window.MeowSDK client, app logic
+    client/             SPA HTML layout, Vanilla CSS design system, window.MeowSDK
+                        client, app logic, WEBUI_MESSAGES (the WebUI-only i18n rows)
   lib/                  ~60 leaf modules (agents, mcp, sessions, transcript, i18n,
                         compact, summarize, usage, tokens, mentions, hooks, …)
 ```
@@ -190,9 +193,18 @@ TUI, and a high-aesthetic **built-in WebUI** (`src/webui/`, started via `meowcod
 `meowcode webui`, `--web`, or `/web`) adhering to Google's **Material 3 Expressive (M3E)**
 design specification (tonal surface containers 0-5, expressive curvatures, spring motion,
 light/dark/system theme switching, and official `@material/web` web components).
-It includes reserved extension slots (`header:*`, `sidebar:*`, `chat:*`, `message:*`, `statusbar:*`),
+It includes reserved extension slots (`header:*`, `sidebar:*`, `chat:*`, `message:*`, `statusbar:*`,
+exported as the runtime `SLOT_IDS` in `webui/types.ts` so the list is enumerable and testable
+against the `[data-slot]` mount points in `client/html.ts`),
 custom panels, tool visualizers, `window.MeowSDK` (with `sdk.theme`, `sdk.slots`, `sdk.panels`,
 `sdk.tools`, `sdk.commands`, `sdk.ui`, and `sdk.m3`), and backend plugin hooks (`WebUIPlugin`).
+
+The WebUI is not a second implementation of anything: it runs the same
+`provider.agent(...)` loop as the TUI through `AgentBridge`, reads the same `SETTINGS` table
+(`/api/settings`), the same command registry (`/api/commands`, `/api/commands/run`), and the
+same i18n catalog (`/api/i18n`). Tool calls go through `tools/permission.ts` like any other
+surface, and anything that needs a decision — permission, user question — is parked on the
+server and answered from the browser over `/api/interaction`.
 
 ## Conventions
 
@@ -232,3 +244,42 @@ custom panels, tool visualizers, `window.MeowSDK` (with `sdk.theme`, `sdk.slots`
 - **Reasoning/agent orchestration sub-features** defined by this repo's own system
   prompt (todo lists, effort levels, workflows) are concrete tools here — when you
   add one, it appears in `TOOLS` and its schema goes to the model.
+- **`AgentBridge` is the third turn engine**, alongside `hooks/useChat.ts` (TUI) and
+  `launcher.runTurn`. A change to turn semantics — a new stream event, a different
+  tool-result shape, compaction timing — has to land in all three or the surfaces
+  silently diverge.
+- **`SettingSpec.surfaces`** (`'tui' | 'web' | 'both'`, default `both`) decides which
+  surface a `SETTINGS` row renders on. `/config` in the TUI filters `!== 'web'`; the
+  WebUI schema renderer filters `!== 'tui'` and shows those rows disabled. A new toggle
+  is still one line in `SETTINGS` — do not add a `localStorage` key in the client.
+- **`lib/i18n.ts` must stay React-free.** `LangProvider`/`useLang`/`useT` live in
+  `hooks/useT.tsx`; the catalog and the pure helpers stay put so `webui/server.ts`
+  can import them without pulling React into the server's dependency graph. Rows the
+  WebUI needs but the TUI has no sentence for go in `webui/client/messages.ts`.
+- **`lib/i18n.ts`'s current language is module state.** The TUI calls `setLang` once at
+  startup; a long-lived WebUI server must re-sync it (`syncCatalogLang`) on every config
+  write, because language can change mid-process from the settings panel or `/config language`.
+- **`runCommand` spreads its `CommandContext`** (`cmd.run({ ...ctx, args })`), so a Proxy
+  handed to it must answer `ownKeys` + `getOwnPropertyDescriptor` + `has`, not just `get`.
+  That spread also reads every member eagerly, which is why `webui/server.ts`'s command
+  probe needs `COMMAND_CONTEXT_VALUE_MEMBERS` — the answer-valued members have to read as
+  `undefined`, or a command like `/plan` takes the browser branch and passes the probe
+  while printing "terminal only" when actually run.
+- **WebUI access control is two layers** (`webui/security.ts`): a per-process token in
+  the URL *fragment*, exchanged for an HttpOnly cookie (cookies are what let
+  `EventSource` authenticate, since it cannot send headers), plus an origin allowlist that
+  stays on even under `--no-auth`. `Access-Control-Allow-Origin: *` must never come back.
+- **The WebUI client is HTML-injection-sensitive in two shapes, and there is a test for
+  each.** `webui/client/*.ts` and `webui/plugins/*.ts` are served as raw template-literal
+  strings, so a sink is (a) a `${…}` interpolated *inside a `<tag …>`* — caught by
+  `escapes every HTML sink the client builds from untrusted text`, which iterates `<tag>`
+  regions rather than matching `<tag …>${` because an attribute value may itself contain
+  a `>` — and (b) a *concatenation*, `'<span>' + value + '</span>'`, where no `${}` ever
+  appears; that one is caught by `escapes every concatenated HTML sink too`, which
+  requires every concatenand to be either `escapeHtml(…)`-wrapped or declared with a
+  reason. `t()` is deliberately not declarable: a translated string must be
+  `escapeHtml(t(…))`. `escapeHtml` is exported as `sdk.escapeHtml` for exactly this
+  reason — a plugin should never hand-roll a copy. Two more traps in those files: a
+  backtick or `${` inside a *comment* is a parse error, not a string, and a value that
+  lands in a `class` attribute (`todo_write`'s `status`) has to be narrowed to an enum
+  rather than escaped.

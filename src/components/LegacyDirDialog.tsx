@@ -3,7 +3,7 @@ import { Box, Text, useInput, useStdin, useStdout } from 'ink'
 import { PICKER_MOTION_ON, PICKER_MOTION_OFF } from '../lib/termmodes'
 import { decodeInput } from '../lib/inkinput'
 import { useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 import { truncateToWidth, wrapToWidth } from '../lib/text'
 import type { LegacyChoice, LegacyDirInfo } from '../lib/legacyDir'
 

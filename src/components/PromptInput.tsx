@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Box, Text, useInput, useStdin, useStdout } from 'ink'
 import { symbols, useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 import type { CommandSpec } from '../types'
 import { toGraphemes, truncateToWidth, displayWidth } from '../lib/text'
 import { loadHistory, appendHistory } from '../lib/history'

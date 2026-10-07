@@ -5,23 +5,31 @@ import type { AgentEvent, AppConfig, Message, SessionUsage } from '../types'
 // Extension Slots (扩展插槽)
 // ============================================================================
 
-export type WellKnownSlotId =
-  | 'header:left'         // Left of header next to brand logo
-  | 'header:center'       // Center of header (e.g. model chip, status)
-  | 'header:actions'      // Right side of header (action buttons)
-  | 'sidebar:header'      // Top of sidebar
-  | 'sidebar:nav'         // Sidebar navigation links/tabs
-  | 'sidebar:footer'      // Bottom of sidebar
-  | 'chat:top'            // Banner / notification above chat transcript
-  | 'chat:toolbar'        // Action toolbar directly above prompt input
-  | 'chat:input_actions'  // Extra action buttons next to submit button
-  | 'message:header'      // Rendered directly above each message content
-  | 'message:footer'      // Rendered directly below each message content
-  | 'message:actions'     // Action buttons on message hover/card
-  | 'statusbar:left'      // Left of bottom status bar
-  | 'statusbar:center'    // Center of bottom status bar
-  | 'statusbar:right'     // Right of bottom status bar
-  | string
+/**
+ * Every slot the WebUI reserves for extensions, in mount order. Kept as a runtime
+ * constant (not just a union) so it can be enumerated — `webui.test.ts` asserts
+ * that each id has a `[data-slot]` mount point in the shipped HTML, which is what
+ * keeps "reserved slots" from quietly rotting into declared-but-unmounted ones.
+ */
+export const SLOT_IDS = [
+  'header:left',         // Left of header next to brand logo
+  'header:center',       // Center of header (e.g. model chip, status)
+  'header:actions',      // Right side of header (action buttons)
+  'sidebar:header',      // Top of sidebar
+  'sidebar:nav',         // Sidebar navigation links/tabs
+  'sidebar:footer',      // Bottom of sidebar
+  'chat:top',            // Banner / notification above chat transcript
+  'chat:toolbar',        // Action toolbar directly above prompt input
+  'chat:input_actions',  // Extra action buttons next to submit button
+  'message:header',      // Rendered directly above each message content
+  'message:footer',      // Rendered directly below each message content
+  'message:actions',     // Action buttons on message hover/card
+  'statusbar:left',      // Left of bottom status bar
+  'statusbar:center',    // Center of bottom status bar
+  'statusbar:right',     // Right of bottom status bar
+] as const
+
+export type WellKnownSlotId = (typeof SLOT_IDS)[number] | string
 
 export interface SlotContext {
   session?: {
@@ -169,6 +177,13 @@ export interface UIHelpers {
 export interface WebUIApiClient {
   sendMessage: (prompt: string) => Promise<{ turn: number }>
   abort: () => Promise<{ aborted: boolean }>
+  /** Queue a follow-up line for the turn currently streaming (mid-turn type-ahead). */
+  queueTurnText: (text: string) => Promise<{ ok: boolean }>
+  /** Answer a pending permission / ask_user prompt raised by the running turn. */
+  respondInteraction: (
+    id: string,
+    response: { decision: 'allow' | 'deny'; reason?: string } | { answers: string[][]; cancelled?: boolean },
+  ) => Promise<{ ok: boolean }>
   getState: () => Promise<{ sessionId: string; messages: Message[]; usage: SessionUsage; isRunning: boolean; config: AppConfig }>
   resetSession: () => Promise<{ sessionId: string }>
   listSessions: () => Promise<Array<{ id: string; savedAt: number; cwd: string; title: string; messageCount: number }>>
@@ -237,6 +252,14 @@ export interface WebUIPlugin {
   version: string
   description?: string
   frontendScript?: string // Inline JavaScript or file path served to browser
+  /**
+   * The directory `frontendScript` is relative to, when it is a path rather than
+   * inline code. A plugin loaded from disk (the future external-plugin loader,
+   * or a converter emitting Claude-Code-style plugins) sets this to its own
+   * directory so its assets travel with it; unregistered in-process plugins omit
+   * it and fall back to the workspace cwd. See PluginManager.getFrontendScripts.
+   */
+  baseDir?: string
   routes?: Record<string, PluginRouteHandler>
   onTurnStart?: (ctx: PluginContext, prompt: string) => Promise<void> | void
   onAgentEvent?: (ctx: PluginContext, event: AgentEvent) => Promise<void> | void
@@ -255,12 +278,22 @@ export interface WebUIOptions {
   cwd?: string
   config?: AppConfig
   plugins?: WebUIPlugin[]
+  /**
+   * Skip token authentication. This is the "reach it from anywhere on purpose"
+   * switch (another device, a tunnel, `--host 0.0.0.0`): it hands the agent to
+   * anyone who can open the port, so it must be asked for explicitly and is
+   * never the default. The origin allowlist stays on either way.
+   */
+  noAuth?: boolean
 }
 
 export interface WebUIServerInstance {
   port: number
   host: string
+  /** The openable URL, token fragment included — opening it authenticates you. */
   url: string
+  /** The same server without the fragment; safe to print in logs. */
+  baseUrl: string
   close: () => Promise<void>
   registerPlugin: (plugin: WebUIPlugin) => void
   getPlugins: () => WebUIPlugin[]

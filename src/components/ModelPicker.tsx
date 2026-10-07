@@ -7,7 +7,7 @@ import { loadCredentials } from '../lib/credentials'
 import { resolveNewapiBase } from '../lib/newapi'
 import { resolveRelayToken } from '../lib/oauth'
 import { displayWidth } from '../lib/text'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 // Interactive /model overlay: a search box + a scrollable selector populated from
 // the API (GET /v1/models via the relay key). When the instance exposes more than

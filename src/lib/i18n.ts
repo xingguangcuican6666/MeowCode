@@ -11,8 +11,11 @@
  * The active language comes from the `language` setting (auto | zh | en); `auto`
  * resolves from the shell locale (LANG/LC_ALL). app.tsx wires the provider and
  * keeps the module mirror in sync.
+ *
+ * This module must stay React-free: the WebUI server imports `messages` to serve
+ * /api/i18n, and a React import here would pull the UI runtime into its
+ * dependency graph. The `useT`/`useLang` hooks live in ../hooks/useT.tsx.
  */
-import { createContext, useContext } from 'react'
 
 export type Lang = 'zh' | 'en'
 export type LangSetting = 'auto' | Lang
@@ -32,7 +35,9 @@ export function resolveLang(setting: string | undefined): Lang {
 
 export type Params = Record<string, string | number>
 
-function interpolate(s: string, params?: Params): string {
+// Exported because the WebUI server serves this same catalog and has to fill a
+// placeholder itself when it adds a row of its own.
+export function interpolate(s: string, params?: Params): string {
   if (!params) return s
   return s.replace(/\{(\w+)\}/g, (whole, k: string) => (k in params ? String(params[k]) : whole))
 }
@@ -750,6 +755,9 @@ export const messages = {
 
 export type MessageKey = keyof typeof messages
 
+/** The shape of one catalog row — a translation per supported language. */
+export interface MessageEntry { zh: string; en: string }
+
 export function translate(lang: Lang, key: MessageKey, params?: Params): string {
   const entry = messages[key] as { zh: string; en: string }
   return interpolate(entry ? (entry[lang] ?? entry.en) : key, params)
@@ -814,6 +822,11 @@ const settingZh: Record<string, { label: string; desc: string }> = {
   autoConnectIde: { label: '自动连接 IDE（外部终端）', desc: '从外部终端连接到运行中的 IDE' },
   chromeEnabled: { label: '默认启用 Claude in Chrome', desc: '为新会话启用 Chrome 集成' },
   disableAllHooks: { label: '禁用所有钩子', desc: '一次性关闭所有已配置的钩子，且不从设置中移除' },
+  chatWidth: { label: '对话宽度', desc: 'WebUI 中对话栏的宽度' },
+  chatFont: { label: '对话字体', desc: 'WebUI 中对话内容的字体' },
+  notifyTurn: { label: '每轮结束通知', desc: '每轮对话结束时发送桌面通知' },
+  speechStyle: { label: '语音风格', desc: '朗读回复时使用的语音' },
+  speechSpeed: { label: '语速', desc: '朗读的语速' },
 }
 
 // Localized label/description for a setting. `en` is the English carried on the
@@ -822,18 +835,23 @@ const settingZh: Record<string, { label: string; desc: string }> = {
 export function settingLabel(lang: Lang, key: string, fallbackEn: string): string {
   return lang === 'zh' ? (settingZh[key]?.label ?? fallbackEn) : fallbackEn
 }
-export function settingDesc(lang: Lang, key: string, fallbackEn: string): string {
-  return lang === 'zh' ? (settingZh[key]?.desc ?? fallbackEn) : fallbackEn
+// Localized setting-group headings. Same one-source-of-truth rule as
+// settingZh: English is the group string carried on the SettingSpec, so only the
+// zh side is stored here.
+const settingGroupZh: Record<string, string> = {
+  'Context & model': '上下文与模型',
+  'Interface': '界面',
+  'Workflow': '工作流',
+  'Editor & input': '编辑器与输入',
+  'Notifications & sessions': '通知与会话',
+  'Advanced': '高级',
+  'Web interface': '网页界面',
 }
 
-const LangContext = createContext<Lang>(currentLang)
-export const LangProvider = LangContext.Provider
+export function settingGroupLabel(lang: Lang, group: string): string {
+  return lang === 'zh' ? (settingGroupZh[group] ?? group) : group
+}
 
-/** The active language from the nearest <LangProvider> above. */
-export function useLang(): Lang { return useContext(LangContext) }
-
-/** A translator bound to the active language; re-renders on a language switch. */
-export function useT(): (key: MessageKey, params?: Params) => string {
-  const lang = useLang()
-  return (key, params) => translate(lang, key, params)
+export function settingDesc(lang: Lang, key: string, fallbackEn: string): string {
+  return lang === 'zh' ? (settingZh[key]?.desc ?? fallbackEn) : fallbackEn
 }

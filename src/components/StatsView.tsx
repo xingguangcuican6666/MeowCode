@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react'
 import { Box, Text } from 'ink'
 import { useTheme, type ThemeColors } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 import {
   loadStats, overview, modelBreakdown, heatmap, rangeTotals,
   funFact, type Range, type StatsStore,

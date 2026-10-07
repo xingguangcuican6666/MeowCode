@@ -5,6 +5,16 @@ const frontendCode = `
   const sdk = window.MeowSDK;
   if (!sdk) return;
 
+  // Template labels come from the i18n catalog, so they are trusted today — but
+  // they render through innerHTML, and a plugin-supplied template would not be.
+  // Escape at the sink so the rule holds for whoever supplies the text next.
+  const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
   function getTemplates() {
     const t = sdk.i18n ? sdk.i18n.t : (k) => k;
     return [
@@ -60,7 +70,7 @@ const frontendCode = `
           pill.className = 'quick-pill-btn';
           pill.setAttribute('aria-label', tmpl.label);
           pill.title = tmpl.label + ' — ' + tmpl.prompt;
-          pill.innerHTML = '<span class="material-symbols-outlined pill-icon">' + tmpl.icon + '</span><span class="pill-label">' + tmpl.label + '</span>';
+          pill.innerHTML = '<span class="material-symbols-outlined pill-icon">' + escapeHtml(tmpl.icon) + '</span><span class="pill-label">' + escapeHtml(tmpl.label) + '</span>';
           pill.onclick = (e) => {
             e.preventDefault();
             isVisible = false;

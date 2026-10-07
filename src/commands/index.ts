@@ -187,9 +187,14 @@ function renderConfig(ctx: CommandContext): void {
     `- \`system\`: ${c.system ? t('cmd.configSystemCustom') : t('cmd.configSystemDefault')}`,
     `- \`apiKey\`: ${c.apiKey ? t('cmd.configApiKeySet') : t('cmd.configApiKeyUnset')} ${t('cmd.configReadonly')}`,
   ]
+  // Rows marked surfaces:['web'] are browser-only preferences; they have no
+  // meaning in a terminal, so /config stays silent about them. Their key still
+  // resolves below — a script may legitimately set one.
   for (const group of settingGroups()) {
+    const rows = SETTINGS.filter((x) => x.group === group && !x.surfaces?.includes('web'))
+    if (rows.length === 0) continue
     lines.push('', `**${group}**`)
-    for (const s of SETTINGS.filter((x) => x.group === group)) {
+    for (const s of rows) {
       const v = formatSettingValue(s, getSetting(c.settings, s.key))
       lines.push(`- \`${s.key}\`: \`${v}\` — ${s.label}`)
     }
@@ -1378,8 +1383,12 @@ const webCmd: SlashCommand = {
     ctx.print(t('cmd.webStarting', { url: `http://127.0.0.1:${port}` }), 'system')
     try {
       const { startWebUI } = await import('../webui')
-      const instance = await startWebUI({ config: ctx.config, port, openBrowser: true })
-      ctx.print(t('cmd.webReady', { url: instance.url }), 'system')
+      // cwd: /web runs inside a live session, so hand the WebUI the working
+      // directory the TUI is using rather than the process's default.
+      const instance = await startWebUI({ config: ctx.config, port, openBrowser: true, cwd: process.cwd() })
+      // baseUrl, not url: the token lives in the URL fragment and the browser
+      // already has it, while this line goes into a transcript saved to disk.
+      ctx.print(t('cmd.webReady', { url: instance.baseUrl }), 'system')
     } catch (e: any) {
       ctx.print(t('cmd.webFailed', { error: e.message || String(e) }), 'system', { error: true })
     }

@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 import type { UserQuestion } from '../types'
 
 interface Props {

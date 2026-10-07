@@ -57,7 +57,7 @@ const frontendCode = `
       <div class="diff-header">
         <span class="material-symbols-outlined diff-icon icon-sm" style="color:var(--md-sys-color-primary);">edit_document</span>
         <span class="diff-filename">\${escapeHtml(file || call.name)}</span>
-        <span class="tool-tag \${isError ? 'tag-error' : 'tag-success'}">\${call.name}</span>
+        <span class="tool-tag \${isError ? 'tag-error' : 'tag-success'}">\${escapeHtml(call.name)}</span>
       </div>
       \${diffHtml}
     \`;
@@ -89,7 +89,11 @@ const frontendCode = `
       </div>
       <div class="todo-item-list">
         \${todos.map(item => {
-          const status = item.status || 'pending';
+          // status comes from the model's todo_write payload and lands in a class
+          // attribute, so it is narrowed to the three drawable states here rather
+          // than interpolated as written.
+          const raw = item.status || 'pending';
+          const status = raw === 'completed' || raw === 'in_progress' ? raw : 'pending';
           const isDone = status === 'completed';
           const isProg = status === 'in_progress';
           const icon = isDone ? 'check_circle' : isProg ? 'sync' : 'radio_button_unchecked';
@@ -99,9 +103,9 @@ const frontendCode = `
 
           return \`
             <div class="todo-item \${status}">
-              <span class="material-symbols-outlined todo-item-icon">\${icon}</span>
+              <span class="material-symbols-outlined todo-item-icon">\${escapeHtml(icon)}</span>
               <span class="todo-item-text">\${escapeHtml(displayText)}</span>
-              <span class="todo-status-tag \${tagClass}">\${statusLabel}</span>
+              <span class="todo-status-tag \${tagClass}">\${escapeHtml(statusLabel)}</span>
             </div>
           \`;
         }).join('')}
@@ -249,7 +253,7 @@ const frontendCode = `
                   <span class="tool-badge-pill">\${escapeHtml(tool.name)}</span>
                   <span class="tool-desc-short">\${escapeHtml(tool.description || '')}</span>
                 </div>
-                <button class="btn btn-xs btn-outline test-btn">\${sdk.i18n ? sdk.i18n.t('plugins.tools.test') : 'Test'}</button>
+                <button class="btn btn-xs btn-outline test-btn">\${escapeHtml(sdk.i18n ? sdk.i18n.t('plugins.tools.test') : 'Test')}</button>
               </div>
               <div class="tool-params-wrap">
                 \${params.map(p => {
@@ -278,7 +282,7 @@ const frontendCode = `
             listContainer.appendChild(card);
           });
         } catch (e) {
-          listContainer.innerHTML = '<div class="text-error">Error: ' + e.message + '</div>';
+          listContainer.innerHTML = '<div class="text-error">' + escapeHtml('Error: ' + e.message) + '</div>';
         }
       }
 

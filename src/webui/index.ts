@@ -1,4 +1,6 @@
 export { startWebUI, createWebUIServer } from './server'
+export { createWebUISecurity, AUTH_COOKIE } from './security'
+export type { WebUISecurity, WebUISecurityOptions } from './security'
 export { AgentBridge } from './agent-bridge'
 export { PluginManager } from './plugin-manager'
 export { workspaceFilesPlugin } from './plugins/workspace-files'

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 
 export type PermissionChoice = 'once' | 'always' | 'deny'
 

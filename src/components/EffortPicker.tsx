@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { useTheme } from '../theme'
-import { useT } from '../lib/i18n'
+import { useT } from '../hooks/useT'
 import { EFFORT_LEVELS, type EffortLevel } from '../lib/settings'
 import { displayWidth } from '../lib/text'
 

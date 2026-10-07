@@ -5,6 +5,16 @@ const frontendCode = `
   const sdk = window.MeowSDK;
   if (!sdk) return;
 
+  // The model and provider names render through innerHTML and come from config,
+  // which /api/config lets a browser write — so treat them as untrusted and
+  // escape at the sink rather than trusting the current call sites.
+  const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
   // 1. Slot: Header Center - Model chip & reasoning indicator
   sdk.slots.register('header:center', {
     id: 'metrics-model-chip',
@@ -12,18 +22,20 @@ const frontendCode = `
     render(container, ctx) {
       const chip = document.createElement('div');
       chip.className = 'header-model-chip';
-      
+
       const model = ctx.config?.model || 'claude-opus-4-8';
       const provider = ctx.config?.provider || 'default';
 
       chip.innerHTML = \`
-        <span class="model-name">\${model}</span>
-        <span class="provider-badge">\${provider}</span>
+        <span class="model-name">\${escapeHtml(model)}</span>
+        <span class="provider-badge">\${escapeHtml(provider)}</span>
         <span id="agent-pulse" class="agent-pulse-dot" style="display:none;" title="Generating..."></span>
       \`;
       container.appendChild(chip);
 
-      sdk.on('status:change', (st) => {
+      // Returned so renderSlot can call it on re-render: without it every
+      // re-render added one more listener on a chip that no longer exists.
+      return sdk.on('status:change', (st) => {
         const dot = chip.querySelector('#agent-pulse');
         if (dot) {
           dot.style.display = st.isRunning ? 'inline-block' : 'none';
@@ -54,7 +66,7 @@ const frontendCode = `
       update(ctx.session?.usage);
       container.appendChild(wrap);
 
-      sdk.on('usage:update', (u) => update(u));
+      return sdk.on('usage:update', (u) => update(u));
     }
   });
 })();

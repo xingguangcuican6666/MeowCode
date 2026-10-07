@@ -54,22 +54,36 @@ export class PluginManager {
     const scripts: Array<{ id: string; script: string }> = []
     for (const p of this.plugins.values()) {
       if (p.frontendScript) {
-        let content = p.frontendScript
-        // If it looks like a file path that exists, read it
-        if (!content.includes('\n') && (content.endsWith('.js') || content.endsWith('.mjs'))) {
-          try {
-            const resolved = path.isAbsolute(content) ? content : path.join(this.cwd, content)
-            if (fs.existsSync(resolved)) {
-              content = fs.readFileSync(resolved, 'utf8')
-            }
-          } catch {
-            // fallback to using content as string
-          }
-        }
-        scripts.push({ id: p.id, script: content })
+        scripts.push({ id: p.id, script: this.readFrontendScript(p) })
       }
     }
     return scripts
+  }
+
+  /**
+   * `frontendScript` is either inline code or a single-line path ending in
+   * .js/.mjs. A path is resolved against the plugin's own `baseDir` first and
+   * only then against the workspace cwd — a plugin loaded from disk carries its
+   * directory with it, so its assets resolve the same way no matter where the
+   * user happened to start the server. That is also the seam a plugin converter
+   * or Claude-Code compatibility layer lands on: emit a plugin with `baseDir`
+   * pointing at its own tree and its frontend asset just works.
+   */
+  private readFrontendScript(plugin: WebUIPlugin): string {
+    const raw = plugin.frontendScript as string
+    if (raw.includes('\n') || !(raw.endsWith('.js') || raw.endsWith('.mjs'))) return raw
+    if (path.isAbsolute(raw)) return fs.existsSync(raw) ? fs.readFileSync(raw, 'utf8') : raw
+    const bases = [plugin.baseDir, this.cwd].filter((b): b is string => Boolean(b))
+    for (const base of bases) {
+      try {
+        const resolved = path.resolve(base, raw)
+        if (fs.existsSync(resolved)) return fs.readFileSync(resolved, 'utf8')
+      } catch {
+        // Try the next base; falling through keeps the literal string, which is
+        // what a plugin author sees if they meant to inline the code.
+      }
+    }
+    return raw
   }
 
   public async handleRoute(
@@ -160,7 +174,15 @@ export class PluginManager {
     return undefined
   }
 
-  public discoverExternalPlugins(): void {
+  /**
+   * The discovery seam for external plugins. Loading them is deliberately out of
+   * scope for now, but the scan and the two directories it searches are fixed
+   * here so a loader (or a Claude-Code plugin converter, which would translate a
+   * manifest into a WebUIPlugin with `baseDir` set) only has to fill in the one
+   * step the loop below marks.
+   */
+  public discoverExternalPlugins(): WebUIPlugin[] {
+    const found: WebUIPlugin[] = []
     const searchDirs = [
       path.join(CONFIG_DIR, 'webui-plugins'),
       path.join(this.cwd, '.meowcode', 'webui-plugins'),
@@ -169,16 +191,19 @@ export class PluginManager {
     for (const dir of searchDirs) {
       if (!fs.existsSync(dir)) continue
       try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true })
-        for (const entry of entries) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           if (!entry.isDirectory() && !entry.name.endsWith('.js') && !entry.name.endsWith('.mjs')) {
             continue
           }
-          // Note: In Node ESM, dynamic import can be supported if user provides external plugins
+          // TODO(translator): load `entry` as a WebUIPlugin. The contract is
+          // id / name / version / frontendScript (path relative to the plugin's
+          // own directory) / routes — set baseDir to the plugin's dir so
+          // readFrontendScript resolves its assets there.
         }
       } catch {
         // ignore scan errors
       }
     }
+    return found
   }
 }

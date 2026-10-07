@@ -1,7 +1,8 @@
 import type { AgentEvent, AgentSnapshot, DiffLine, Message, Provider, StreamOpts, WorkflowAgent } from '../types'
 import path from 'node:path'
 import fsp from 'node:fs/promises'
-import { runTool, renderWorkflowReport } from '../tools'
+import { runTool, renderWorkflowReport, summarizeToolCall } from '../tools'
+import { decidePermission, isPermissionMode, matchPermissionRule, DENY_RULE_REASON } from '../tools/permission'
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -120,6 +121,50 @@ function makeMockWorkflow(gi: number, names: string[], opts: StreamOpts, cwd: st
 // tool_result → final report), so the bottom agent switcher lists it and the
 // viewport can swap to its chat with no API key. Distinct from makeMockWorkflow,
 // which drives the workflow *tree*. Returns the final report for the tool result.
+/**
+ * The permission gate, at parity with providers/anthropic.ts.
+ *
+ * The mock calls `runTool` directly instead of yielding a `tool_use` for the loop
+ * to dispatch, so without this it would be the one surface where `permissionMode`
+ * and the persistent rules do not apply — `run: rm -rf …` would execute under a
+ * deny rule that binds every other provider. Same three layers as anthropic's
+ * (decidePermission → matchPermissionRule → requestPermission) and the same refusal
+ * strings, including the one that matters most here: with no `requestPermission`
+ * installed an 'ask' still runs, exactly as anthropic lets it, because a
+ * non-interactive host has no dialog to ask and every interactive one does install
+ * the prompt. Denials come back as an error tool_result so the mock's canned reply
+ * can report them honestly.
+ */
+async function permitted(
+  name: string,
+  input: Record<string, unknown>,
+  opts: StreamOpts,
+): Promise<string | undefined> {
+  const mode = String(opts.permissionMode ?? 'default')
+  const permMode = isPermissionMode(mode) ? mode : 'default'
+  let decision = decidePermission(permMode, name, { autoModeInPlan: opts.autoModeInPlan })
+  const rule = matchPermissionRule(name, input, opts.permissionRules)
+  if (rule === 'deny') decision = { action: 'deny', reason: DENY_RULE_REASON }
+  else if (rule === 'allow' && decision.action === 'ask') decision = { action: 'allow' }
+  else if (rule === 'ask' && decision.action === 'allow' && permMode !== 'bypassPermissions') {
+    decision = { action: 'ask' }
+  }
+  if (decision.action === 'allow') return undefined
+  if (decision.action === 'deny') return decision.reason
+  // No prompt installed = a non-interactive host (print mode, a sub-agent), and
+  // anthropic treats an 'ask' there as a run rather than a refusal. Matching that
+  // keeps the two providers interchangeable; every interactive host — the TUI and
+  // the WebUI's parked-interaction handshake — does install requestPermission, so
+  // the hole this closes is closed where it was actually open.
+  if (!opts.requestPermission) return undefined
+  const verdict = await opts.requestPermission({
+    tool: name,
+    input,
+    summary: summarizeToolCall(name, input),
+  })
+  return verdict === 'allow' ? undefined : '用户拒绝了本次工具调用。'
+}
+
 async function driveMockAgent(opts: StreamOpts, kind: 'task' | 'plan', label: string): Promise<string> {
   const id = `${kind}-mock-${(Date.now?.() ?? 0).toString(36)}`
   const type = kind === 'plan' ? 'plan' : 'general'
@@ -294,6 +339,13 @@ async function* agent(messages: Message[], opts: StreamOpts): AsyncGenerator<Age
         activeForm: idx === 0 ? `Working on: ${content}` : undefined,
       }))
       yield { type: 'tool_use', id: id1, name: 'todo_write', input: { todos: initialTodos } }
+      const gate1 = await permitted('todo_write', { todos: initialTodos }, opts)
+      if (opts.signal?.aborted) return
+      if (gate1) {
+        yield { type: 'tool_result', id: id1, name: 'todo_write', content: gate1, isError: true }
+        for await (const ev of streamText(`\n\nTask list refused: ${gate1}`, opts)) yield ev
+        return
+      }
       const res1 = await runTool('todo_write', { todos: initialTodos }, { cwd, signal: opts.signal })
       if (opts.signal?.aborted) return
       yield { type: 'tool_result', id: id1, name: 'todo_write', content: res1.content }
@@ -309,6 +361,13 @@ async function* agent(messages: Message[], opts: StreamOpts): AsyncGenerator<Age
         activeForm: idx === 1 ? `Working on: ${content}` : undefined,
       }))
       yield { type: 'tool_use', id: id2, name: 'todo_write', input: { todos: progressedTodos } }
+      const gate2 = await permitted('todo_write', { todos: progressedTodos }, opts)
+      if (opts.signal?.aborted) return
+      if (gate2) {
+        yield { type: 'tool_result', id: id2, name: 'todo_write', content: gate2, isError: true }
+        for await (const ev of streamText(`\n\nTask list progress refused: ${gate2}`, opts)) yield ev
+        return
+      }
       const res2 = await runTool('todo_write', { todos: progressedTodos }, { cwd, signal: opts.signal })
       if (opts.signal?.aborted) return
       yield { type: 'tool_result', id: id2, name: 'todo_write', content: res2.content }
@@ -375,6 +434,13 @@ async function* agent(messages: Message[], opts: StreamOpts): AsyncGenerator<Age
     const id = `mock_${Date.now?.() ?? '0'}`
     const input = mk(m[1])
     yield { type: 'tool_use', id, name: tool, input }
+    const gate = await permitted(tool, input, opts)
+    if (opts.signal?.aborted) return
+    if (gate) {
+      yield { type: 'tool_result', id, name: tool, content: gate, isError: true }
+      for await (const ev of streamText(`\n\nThat \`${tool}\` call was refused: ${gate}`, opts)) yield ev
+      return
+    }
     const r = await runTool(tool, input, { cwd, signal: opts.signal })
     if (opts.signal?.aborted) return
     yield { type: 'tool_result', id, name: tool, content: r.content, isError: r.isError, linesAdded: r.linesAdded, linesRemoved: r.linesRemoved, diff: r.diff }
