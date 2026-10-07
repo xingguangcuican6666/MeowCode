@@ -268,8 +268,17 @@ export const CLIENT_APP_JS = `/**
     });
 
     // A re-sweep must not stack listeners on slots that were already rendered
-    // with their own message context.
-    chatTranscript.querySelectorAll('.message-row').forEach(renderMessageSlots);
+    // with their own message context — dispose old cleanups first, then re-render
+    // with the correct message for each row.
+    chatTranscript.querySelectorAll('.message-row').forEach((row) => {
+      const msgId = row.getAttribute('data-message-id');
+      if (!msgId) return;
+      const message = messages.find(m => m.id === msgId);
+      if (message) {
+        disposeMessageSlots(row);
+        renderMessageSlots(row, message);
+      }
+    });
   }
 
   sdk.on('slot:registered', () => renderAllSlots());
