@@ -255,9 +255,20 @@ export interface WebUIOptions {
   cwd?: string
   config?: AppConfig
   plugins?: WebUIPlugin[]
+  // Access control for the /api routes. The server drives the agent with
+  // bypassPermissions and `/api/tools/call` reaches any tool, so a per-run token is
+  // required by default; the served page embeds it, so opening the printed URL just
+  // works. `auth: false` disables the check — only for a trusted, isolated context.
+  auth?: boolean
+  // Use this token instead of a freshly generated one (e.g. a launcher that wants a
+  // stable URL across restarts).
+  authToken?: string
 }
 
 export interface WebUIServerInstance {
+  // The per-run API token ('' when auth is disabled). Append it as ?token=… to
+  // reach the API from a client that isn't the served page.
+  token: string
   port: number
   host: string
   url: string

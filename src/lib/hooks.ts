@@ -17,12 +17,13 @@
 // A JSON stdout object may set: continue(false=stop), stopReason/reason,
 // decision('block'|'approve'), systemMessage, and
 // hookSpecificOutput.{permissionDecision, permissionDecisionReason, additionalContext}.
-import { spawn } from 'node:child_process'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import { loadConfig } from '../config'
 import { getSetting } from './settings'
+import { isProjectTrusted } from './trust'
+import { runCaptured } from './shell'
 
 export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit' | 'SessionStart' | 'Stop' | 'Notification'
 
@@ -56,10 +57,13 @@ export function loadHooks(cwd = process.cwd()): HooksConfig {
     }
   }
   add(cfg.hooks)
-  // Project-local settings.json (only its `hooks` key is consulted here).
+  // Project-local settings.json (only its `hooks` key is consulted here). These
+  // are commands a CHECKED-OUT REPOSITORY asks us to run, so they stay inert until
+  // the user trusts this directory (/trust) — otherwise cloning a repo and starting
+  // MeowCode in it would be enough to execute whatever its author configured.
   try {
     const p = path.join(cwd, '.meowcode', 'settings.json')
-    if (p !== path.join(os.homedir(), '.meowcode', 'settings.json')) {
+    if (p !== path.join(os.homedir(), '.meowcode', 'settings.json') && isProjectTrusted(cwd)) {
       const j = JSON.parse(fs.readFileSync(p, 'utf8')) as { hooks?: HooksConfig }
       add(j.hooks)
     }
@@ -102,24 +106,20 @@ export interface HookOutcome {
 
 interface OneResult { code: number; stdout: string; stderr: string }
 
-function runOne(cmd: HookCommand, payload: unknown, cwd: string, signal?: AbortSignal): Promise<OneResult> {
-  return new Promise((resolve) => {
-    const timeoutMs = Math.max(1000, (cmd.timeout && cmd.timeout > 0 ? cmd.timeout : 60) * 1000)
-    let child
-    try {
-      child = spawn(cmd.command, { cwd, shell: '/bin/bash', signal })
-    } catch (e) {
-      return resolve({ code: 1, stdout: '', stderr: (e as Error).message })
-    }
-    let stdout = ''
-    let stderr = ''
-    const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* gone */ } }, timeoutMs)
-    child.stdout?.on('data', (d) => { stdout += d.toString() })
-    child.stderr?.on('data', (d) => { stderr += d.toString() })
-    child.on('error', (e) => { clearTimeout(timer); resolve({ code: 1, stdout, stderr: stderr || (e as Error).message }) })
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? 0, stdout, stderr }) })
-    try { child.stdin?.write(JSON.stringify(payload)); child.stdin?.end() } catch { /* stdin may be closed */ }
+// A hook is a tracked process-group leader with bounded output: the timeout and an
+// abort kill the whole tree. A hook that is killed by the timeout used to resolve as
+// exit code 0 (success) with partial stdout; it is now a non-blocking failure.
+async function runOne(cmd: HookCommand, payload: unknown, cwd: string, signal?: AbortSignal): Promise<OneResult> {
+  const timeoutSec = cmd.timeout && cmd.timeout > 0 ? cmd.timeout : 60
+  const r = await runCaptured(cmd.command, {
+    cwd, signal, timeoutMs: Math.max(1000, timeoutSec * 1000),
+    input: JSON.stringify(payload), headChars: 64_000, tailChars: 16_000,
   })
+  if (r.error) return { code: 1, stdout: r.stdout, stderr: r.stderr || r.error }
+  if (r.timedOut) return { code: 1, stdout: r.stdout, stderr: r.stderr || `timed out after ${timeoutSec}s` }
+  if (r.aborted) return { code: 1, stdout: r.stdout, stderr: r.stderr || 'aborted' }
+  // A signal death has no exit code; report it as a (non-blocking) failure.
+  return { code: r.code ?? 1, stdout: r.stdout, stderr: r.stderr }
 }
 
 // Parse a hook's stdout as a JSON control object; returns null if it isn't one.

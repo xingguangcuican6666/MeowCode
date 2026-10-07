@@ -33,12 +33,17 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import {
+  isProjectTrusted, trustProject, untrustProject, listTrusted,
+  projectDefinesExecutables, projectSettingsPath,
+} from '../lib/trust'
+import {
   SETTINGS, SETTINGS_BY_KEY, settingGroups, getSetting,
   formatSettingValue, coerceSetting, settingHint, EFFORT_LEVELS, isEffortLevel,
 } from '../lib/settings'
 
 const help: SlashCommand = {
   name: 'help',
+  descKey: 'cmd.helpDesc',
   aliases: ['?'],
   get description() { return t('cmd.helpDesc') },
   run(ctx) {
@@ -52,6 +57,7 @@ const help: SlashCommand = {
 
 const clear: SlashCommand = {
   name: 'clear',
+  descKey: 'cmd.clearDesc',
   aliases: ['reset'],
   get description() { return t('cmd.clearDesc') },
   run(ctx) { ctx.clear() },
@@ -63,12 +69,14 @@ const clear: SlashCommand = {
 // "start a new session" affordance users expected but couldn't find.
 const newSession: SlashCommand = {
   name: 'new',
+  descKey: 'cmd.newDesc',
   get description() { return t('cmd.newDesc') },
   run(ctx) { ctx.clear() },
 }
 
 const model: SlashCommand = {
   name: 'model',
+  descKey: 'cmd.modelDesc',
   get description() { return t('cmd.modelDesc') },
   async run(ctx) {
     const next = ctx.args.trim()
@@ -96,6 +104,7 @@ const model: SlashCommand = {
 // hooks/useChat) so it actually steers how much the agent explores/verifies.
 const effort: SlashCommand = {
   name: 'effort',
+  descKey: 'cmd.effortDesc',
   get description() { return t('cmd.effortDesc', { levels: EFFORT_LEVELS.join(' | ') }) },
   run(ctx) {
     const cur = String(getSetting(ctx.config.settings, 'effort'))
@@ -121,6 +130,7 @@ const effort: SlashCommand = {
 const OUTPUT_STYLES = ['default', 'concise', 'explanatory'] as const
 const outputStyle: SlashCommand = {
   name: 'output-style',
+  descKey: 'cmd.outputStyleDesc',
   aliases: ['outputstyle'],
   get description() { return t('cmd.outputStyleDesc', { styles: OUTPUT_STYLES.join(' | ') }) },
   run(ctx) {
@@ -141,6 +151,7 @@ const outputStyle: SlashCommand = {
 // normal|vim|emacs|off argument sets that mode directly. ---
 const vim: SlashCommand = {
   name: 'vim',
+  descKey: 'cmd.vimDesc',
   get description() { return t('cmd.vimDesc') },
   run(ctx) {
     const cur = String(getSetting(ctx.config.settings, 'editorMode') || 'normal')
@@ -157,6 +168,7 @@ const vim: SlashCommand = {
 
 const provider: SlashCommand = {
   name: 'provider',
+  descKey: 'cmd.providerDesc',
   get description() { return t('cmd.providerDesc') },
   run(ctx) {
     const next = ctx.args.trim()
@@ -214,6 +226,7 @@ function setSchemaSetting(ctx: CommandContext, spec: (typeof SETTINGS)[number], 
 
 const config: SlashCommand = {
   name: 'config',
+  descKey: 'cmd.configDesc',
   get description() { return t('cmd.configDesc') },
   run(ctx) {
     const c = ctx.config
@@ -270,6 +283,7 @@ const config: SlashCommand = {
 // --- /usage: session token accounting + context-window fill ---
 const usage: SlashCommand = {
   name: 'usage',
+  descKey: 'cmd.usageDesc',
   aliases: ['tokens', 'cost'],
   get description() { return t('cmd.usageDesc') },
   run(ctx) {
@@ -298,6 +312,7 @@ const usage: SlashCommand = {
 // --- /status: a one-shot snapshot of the whole session ---
 const status: SlashCommand = {
   name: 'status',
+  descKey: 'cmd.statusDesc',
   get description() { return t('cmd.statusDesc') },
   run(ctx) {
     if (ctx.openPanel) { ctx.openPanel('status'); return }
@@ -334,6 +349,7 @@ const status: SlashCommand = {
 // --- /stats: session statistics (turns, tokens, tool calls, ratios) ---
 const stats: SlashCommand = {
   name: 'stats',
+  descKey: 'cmd.statsDesc',
   get description() { return t('cmd.statsDesc') },
   run(ctx) {
     if (ctx.openPanel) { ctx.openPanel('stats'); return }
@@ -360,6 +376,7 @@ const stats: SlashCommand = {
 // --- /compact: fold older messages into a digest to reclaim context ---
 const compact: SlashCommand = {
   name: 'compact',
+  descKey: 'cmd.compactDesc',
   get description() { return t('cmd.compactDesc') },
   async run(ctx) {
     if (!ctx.compact) { ctx.print(t('cmd.tuiOnly', { cmd: '/compact' }), 'system', { error: true }); return }
@@ -390,6 +407,7 @@ function parseTokens(s: string): number | null {
 // autoCompactWindow) so it persists.
 const autocompact: SlashCommand = {
   name: 'autocompact',
+  descKey: 'cmd.autocompactDesc',
   aliases: ['auto-compact'],
   get description() { return t('cmd.autocompactDesc') },
   run(ctx) {
@@ -423,6 +441,7 @@ const autocompact: SlashCommand = {
 // --- /skill: list reusable prompt playbooks, or run one ---
 const skill: SlashCommand = {
   name: 'skill',
+  descKey: 'cmd.skillDesc',
   aliases: ['skills'],
   get description() { return t('cmd.skillDesc') },
   run(ctx) {
@@ -451,6 +470,7 @@ const skill: SlashCommand = {
 
 const version: SlashCommand = {
   name: 'version',
+  descKey: 'cmd.versionDesc',
   get description() { return t('cmd.versionDesc') },
   run(ctx) { ctx.print(`MeowCode v${VERSION}`, 'system') },
 }
@@ -468,6 +488,7 @@ const INIT_PROMPT =
 
 const init: SlashCommand = {
   name: 'init',
+  descKey: 'cmd.initDesc',
   get description() { return t('cmd.initDesc') },
   run(ctx) {
     if (!ctx.send) { ctx.print(t('cmd.initNonInteractive'), 'system', { error: true }); return }
@@ -482,9 +503,53 @@ const init: SlashCommand = {
   },
 }
 
+// --- /trust: the gate in front of a REPOSITORY's own hooks/MCP servers ---
+// Project-level `hooks`/`mcpServers` stay inert until the user trusts the
+// directory, so cloning a repo and starting MeowCode in it can't run its author's
+// commands. This command shows what is declared and grants/revokes that trust.
+const trust: SlashCommand = {
+  name: 'trust',
+  descKey: 'cmd.trustDesc',
+  get description() { return t('cmd.trustDesc') },
+  run(ctx) {
+    const cwd = process.cwd()
+    const arg = ctx.args.trim().toLowerCase()
+    if (arg === 'list') {
+      const all = listTrusted()
+      if (!all.length) { ctx.print(t('cmd.trustListEmpty'), 'system'); return }
+      ctx.print(`${t('cmd.trustListHeader')}\n${all.map((e) => `  • ${e.path}`).join('\n')}`, 'system')
+      return
+    }
+    const found = projectDefinesExecutables(cwd)
+    const settingsPath = projectSettingsPath(cwd)
+    if (arg === 'remove' || arg === 'revoke' || arg === 'off') {
+      if (!untrustProject(cwd)) { ctx.print(t('cmd.trustNotTrusted'), 'system'); return }
+      ctx.print(t('cmd.trustRevoked'), 'system')
+      return
+    }
+    if (found.hooks === 0 && found.mcpServers.length === 0) {
+      ctx.print(t('cmd.trustNoConfig', { path: settingsPath }), 'system')
+      return
+    }
+    if (arg === 'add' || arg === 'grant' || arg === 'on') {
+      if (!trustProject(cwd)) { ctx.print(t('cmd.trustWriteFailed'), 'system', { error: true }); return }
+      ctx.print(t('cmd.trustGranted'), 'system')
+      return
+    }
+    // No argument: report what is declared and whether it may run.
+    const lines = [t('cmd.trustHeader', { path: settingsPath })]
+    if (found.hooks > 0) lines.push(t('cmd.trustHooksLine', { count: String(found.hooks) }))
+    if (found.mcpServers.length) lines.push(t('cmd.trustMcpLine', { names: found.mcpServers.join(', ') }))
+    lines.push('')
+    lines.push(isProjectTrusted(cwd) ? t('cmd.trustStatusTrusted') : t('cmd.trustStatusUntrusted'))
+    ctx.print(lines.join('\n'), 'system')
+  },
+}
+
 // --- /hooks: show configured lifecycle hooks (read-only viewer) ---
 const hooks: SlashCommand = {
   name: 'hooks',
+  descKey: 'cmd.hooksDesc',
   get description() { return t('cmd.hooksDesc') },
   run(ctx) {
     const cfg = loadHooks(process.cwd())
@@ -506,6 +571,7 @@ const hooks: SlashCommand = {
 // --- /mcp: show configured MCP servers, their status and discovered tools ---
 const mcp: SlashCommand = {
   name: 'mcp',
+  descKey: 'cmd.mcpDesc',
   get description() { return t('cmd.mcpDesc') },
   run(ctx) {
     const list = listMcpServers()
@@ -529,6 +595,7 @@ const mcp: SlashCommand = {
 // --- /doctor: environment & configuration health check (read-only) ---
 const doctor: SlashCommand = {
   name: 'doctor',
+  descKey: 'cmd.doctorDesc',
   get description() { return t('cmd.doctorDesc') },
   run(ctx) {
     const c = ctx.config
@@ -564,6 +631,7 @@ const doctor: SlashCommand = {
 const ROLE_LABEL: Record<string, string> = { user: 'User', assistant: 'Assistant', system: 'System', tool: 'Tool' }
 const exportCmd: SlashCommand = {
   name: 'export',
+  descKey: 'cmd.exportDesc',
   get description() { return t('cmd.exportDesc') },
   run(ctx) {
     const msgs = ctx.messages.filter((m) => m.content && m.content.trim() && !m.meta?.turnDone && !m.meta?.folded)
@@ -593,6 +661,7 @@ const REVIEW_PROMPT =
   'Cite specific files and line ranges. Be concise; skip praise and trivia. If the changes look solid, say so briefly.'
 const review: SlashCommand = {
   name: 'review',
+  descKey: 'cmd.reviewDesc',
   get description() { return t('cmd.reviewDesc') },
   run(ctx) {
     if (!ctx.send) { ctx.print(t('cmd.reviewNonInteractive'), 'system', { error: true }); return }
@@ -605,6 +674,7 @@ const review: SlashCommand = {
 // --- /terminal-setup: detect the terminal and advise on multiline keybindings ---
 const terminalSetup: SlashCommand = {
   name: 'terminal-setup',
+  descKey: 'cmd.termSetupDesc',
   get description() { return t('cmd.termSetupDesc') },
   run(ctx) {
     const prog = process.env.TERM_PROGRAM || process.env.TERM || 'unknown'
@@ -621,6 +691,7 @@ const terminalSetup: SlashCommand = {
 // --- /statusline: set or clear the custom status-line shell command ---
 const statusline: SlashCommand = {
   name: 'statusline',
+  descKey: 'cmd.statuslineDesc',
   get description() { return t('cmd.statuslineDesc') },
   run(ctx) {
     const arg = ctx.args.trim()
@@ -642,6 +713,7 @@ const statusline: SlashCommand = {
 
 const exit: SlashCommand = {
   name: 'exit',
+  descKey: 'cmd.exitDesc',
   aliases: ['quit', 'q'],
   get description() { return t('cmd.exitDesc') },
   run(ctx) { ctx.exit() },
@@ -654,6 +726,7 @@ const exit: SlashCommand = {
 // strings, e.g. `bash(git *)`, `Edit(src/**)`, `web_fetch(domain:example.com)`.
 const permissions: SlashCommand = {
   name: 'permissions',
+  descKey: 'cmd.permsDesc',
   aliases: ['perms'],
   get description() { return t('cmd.permsDesc') },
   run(ctx) {
@@ -722,6 +795,7 @@ const permissions: SlashCommand = {
 // (see app.tsx onResume). `meowcode --continue` reopens the latest without the UI.
 const resume: SlashCommand = {
   name: 'resume',
+  descKey: 'cmd.resumeDesc',
   get description() { return t('cmd.resumeDesc') },
   run(ctx) {
     if (ctx.openResume) { ctx.openResume(); return }
@@ -736,6 +810,7 @@ const resume: SlashCommand = {
 // where it came from. `meowcode --fork-session [id]` does the same at launch.
 const fork: SlashCommand = {
   name: 'fork',
+  descKey: 'cmd.forkDesc',
   get description() { return t('cmd.forkDesc') },
   run(ctx) {
     if (!ctx.forkCurrent) { ctx.print(t('cmd.forkNonInteractive'), 'system'); return }
@@ -750,6 +825,7 @@ const fork: SlashCommand = {
 // /mcp and /hooks). Defining a new agent is a Markdown file, not a command. ---
 const agents: SlashCommand = {
   name: 'agents',
+  descKey: 'cmd.agentsDesc',
   get description() { return t('cmd.agentsDesc') },
   run(ctx) {
     const cwd = process.cwd()
@@ -771,6 +847,7 @@ const agents: SlashCommand = {
 
 const theme: SlashCommand = {
   name: 'theme',
+  descKey: 'cmd.themeDesc',
   get description() { return t('cmd.themeDesc') },
   run(ctx) {
     const next = ctx.args.trim()
@@ -804,6 +881,7 @@ const theme: SlashCommand = {
 // completion (GOAL_COMPLETE, injected via the system preamble), and auto-clears.
 const goal: SlashCommand = {
   name: 'goal',
+  descKey: 'cmd.goalDesc',
   get description() { return t('cmd.goalDesc') },
   run(ctx) {
     const arg = ctx.args.trim()
@@ -845,6 +923,7 @@ let planPrevMode: string | null = null
 
 const plan: SlashCommand = {
   name: 'plan',
+  descKey: 'cmd.planDesc',
   get description() { return t('cmd.planDesc') },
   run(ctx) {
     const arg = ctx.args.trim()
@@ -898,6 +977,7 @@ function parseInterval(tok: string): number | null {
 
 const loop: SlashCommand = {
   name: 'loop',
+  descKey: 'cmd.loopDesc',
   get description() { return t('cmd.loopDesc') },
   run(ctx) {
     const arg = ctx.args.trim()
@@ -935,6 +1015,7 @@ const loop: SlashCommand = {
 // --- /memory: the structured, cross-session memory store (goal lives in /goal) ---
 const memory: SlashCommand = {
   name: 'memory',
+  descKey: 'cmd.memoryDesc',
   get description() { return t('cmd.memoryDesc') },
   run(ctx) {
     const arg = ctx.args.trim()
@@ -996,6 +1077,7 @@ const memory: SlashCommand = {
 // lib/newapi, lib/credentials, components/LoginPanel.
 const login: SlashCommand = {
   name: 'login',
+  descKey: 'cmd.loginDesc',
   get description() { return t('cmd.loginDesc') },
   run(ctx) {
     const cur = loadCredentials()
@@ -1010,6 +1092,7 @@ const login: SlashCommand = {
 
 const logout: SlashCommand = {
   name: 'logout',
+  descKey: 'cmd.logoutDesc',
   get description() { return t('cmd.logoutDesc') },
   async run(ctx) {
     const cur = loadCredentials()
@@ -1045,6 +1128,7 @@ const logout: SlashCommand = {
 // (`/copy <n>`, 1 = most recent). Uses the OSC 52 + native clipboard bridge.
 const copy: SlashCommand = {
   name: 'copy',
+  descKey: 'cmd.copyDesc',
   aliases: ['cp'],
   get description() { return t('cmd.copyDesc') },
   run(ctx) {
@@ -1080,6 +1164,7 @@ const copy: SlashCommand = {
 // The worktree lands under `<repo>/.worktrees/<name>` on a new branch.
 const worktree: SlashCommand = {
   name: 'worktree',
+  descKey: 'cmd.worktreeDesc',
   aliases: ['wt'],
   get description() { return t('cmd.worktreeDesc') },
   async run(ctx) {
@@ -1098,6 +1183,7 @@ const worktree: SlashCommand = {
 // app suspends Ink's raw mode while the editor owns the terminal (see app.tsx).
 const editor: SlashCommand = {
   name: 'editor',
+  descKey: 'cmd.editorDesc',
   get description() { return t('cmd.editorDesc') },
   run(ctx) {
     if (getSetting(ctx.config.settings, 'lastResponseInEditor') !== true) { ctx.print(t('cmd.editorDisabled'), 'system'); return }
@@ -1114,6 +1200,7 @@ const editor: SlashCommand = {
 // saves the report immediately.
 const feedback: SlashCommand = {
   name: 'feedback',
+  descKey: 'cmd.feedbackDesc',
   get description() { return t('cmd.feedbackDesc') },
   run(ctx) {
     const body = ctx.args.trim()
@@ -1139,6 +1226,7 @@ const feedback: SlashCommand = {
 // before write_file/edit_file while rewindCode is on (see lib/checkpoints).
 const rewind: SlashCommand = {
   name: 'rewind',
+  descKey: 'cmd.rewindDesc',
   aliases: ['undo'],
   get description() { return t('cmd.rewindDesc') },
   run(ctx) {
@@ -1171,6 +1259,7 @@ const rewind: SlashCommand = {
 // mailbox effect, so this only works when the setting isn't 'off'.
 const dm: SlashCommand = {
   name: 'dm',
+  descKey: 'cmd.dmDesc',
   aliases: ['msg'],
   get description() { return t('cmd.dmDesc') },
   run(ctx) {
@@ -1214,6 +1303,7 @@ const dm: SlashCommand = {
 // stays on /dm; this is the "list + subscribe" surface.
 const sessions: SlashCommand = {
   name: 'sessions',
+  descKey: 'cmd.sessionsDesc',
   aliases: ['sess'],
   get description() { return t('cmd.sessionsDesc') },
   run(ctx) {
@@ -1251,6 +1341,7 @@ const sessions: SlashCommand = {
 // extension, so this never claims a handshake it didn't make.
 const ide: SlashCommand = {
   name: 'ide',
+  descKey: 'cmd.ideDesc',
   get description() { return t('cmd.ideDesc') },
   run(ctx) {
     const auto = getSetting(ctx.config.settings, 'autoConnectIde') === true
@@ -1271,6 +1362,7 @@ const ide: SlashCommand = {
 // control needs a companion extension, which this honestly notes.
 const chrome: SlashCommand = {
   name: 'chrome',
+  descKey: 'cmd.chromeDesc',
   get description() { return t('cmd.chromeDesc') },
   run(ctx) {
     const on = getSetting(ctx.config.settings, 'chromeEnabled') === true
@@ -1298,6 +1390,7 @@ const chrome: SlashCommand = {
 // EntryInstallError reads as a clean red line.
 const entry: SlashCommand = {
   name: 'entry',
+  descKey: 'cmd.entryDesc',
   get description() { return t('cmd.entryDesc') },
   run(ctx) {
     const arg = ctx.args.trim()
@@ -1370,6 +1463,7 @@ const entry: SlashCommand = {
 
 const webCmd: SlashCommand = {
   name: 'web',
+  descKey: 'cmd.webDesc',
   aliases: ['webui'],
   get description() { return t('cmd.webDesc') },
   async run(ctx) {
@@ -1386,7 +1480,7 @@ const webCmd: SlashCommand = {
   },
 }
 
-const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, entry, resume, fork, version, exit, webCmd]
+const builtins: SlashCommand[] = [help, clear, newSession, model, provider, login, logout, effort, outputStyle, vim, theme, goal, plan, loop, memory, config, usage, status, stats, compact, autocompact, skill, init, hooks, mcp, agents, doctor, exportCmd, review, terminalSetup, statusline, permissions, trust, copy, worktree, editor, feedback, rewind, dm, sessions, ide, chrome, entry, resume, fork, version, exit, webCmd]
 
 // Merge user-defined commands (from ~/.meowcode/commands and ./.meowcode/commands)
 // into the registry, but never let them shadow a built-in name or alias. Loaded

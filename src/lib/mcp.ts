@@ -13,10 +13,12 @@
 // Everything here is in-memory and process-scoped: servers start on app mount and
 // are killed on exit. Discovery is async, so a server's tools appear once it has
 // initialized (by the next turn at the latest).
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { spawnFile, killTree } from './shell'
 import path from 'node:path'
 import fs from 'node:fs'
 import { loadConfig } from '../config'
+import { isProjectTrusted } from './trust'
 import type { ToolDef, ToolResult } from '../tools/types'
 
 export interface McpServerConfig {
@@ -127,6 +129,9 @@ function onStdout(srv: McpServer, chunk: Buffer): void {
 
 // Merge the user-global `mcpServers` (settings.json via AppConfig) with a
 // project-local .meowcode/settings.json; the project entry wins on name clash.
+// The project half is gated on trust (see lib/trust): those entries spawn
+// processes, so a freshly cloned repository must not be able to start one just by
+// being opened. The user's own global servers are unaffected.
 export function loadMcpServers(cwd = process.cwd()): McpServers {
   const out: McpServers = {}
   try {
@@ -135,7 +140,7 @@ export function loadMcpServers(cwd = process.cwd()): McpServers {
   } catch {}
   try {
     const p = path.join(cwd, '.meowcode', 'settings.json')
-    if (fs.existsSync(p)) {
+    if (fs.existsSync(p) && isProjectTrusted(cwd)) {
       const proj = JSON.parse(fs.readFileSync(p, 'utf8'))?.mcpServers as McpServers | undefined
       if (proj && typeof proj === 'object') Object.assign(out, proj)
     }
@@ -173,7 +178,8 @@ async function initServer(srv: McpServer): Promise<void> {
 }
 
 function spawnServer(name: string, config: McpServerConfig, cwd: string): McpServer {
-  const child = spawn(config.command, config.args ?? [], {
+  // Tracked, group-leader child: it (and anything it forks) dies with MeowCode.
+  const child = spawnFile(config.command, config.args ?? [], {
     cwd: config.cwd || cwd,
     env: { ...process.env, ...(config.env ?? {}) } as NodeJS.ProcessEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -183,10 +189,17 @@ function spawnServer(name: string, config: McpServerConfig, cwd: string): McpSer
     buf: '', nextId: 1, pending: new Map(),
   }
   child.stdout?.on('data', (c: Buffer) => onStdout(srv, c))
+  // Drain stderr: a server that logs there blocks forever once the 64 KB pipe buffer
+  // fills if nobody reads it. Keep the tail so a failure can say why.
+  let errTail = ''
+  child.stderr?.on('data', (c: Buffer) => { errTail = (errTail + c.toString('utf8')).slice(-2000) })
   child.on('error', (e) => fail(srv, e))
   child.on('exit', (code) => {
     if (srv.status === 'stopped') return
-    if (srv.status !== 'ready' || code) fail(srv, new Error(`server exited (code ${code})`))
+    if (srv.status !== 'ready' || code) {
+      const why = errTail.trim().split('\n').slice(-3).join(' | ').slice(0, 300)
+      fail(srv, new Error(`server exited (code ${code})${why ? `: ${why}` : ''}`))
+    }
     else srv.status = 'stopped'
   })
   return srv
@@ -221,7 +234,7 @@ export function startMcpServers(cwd = process.cwd()): void {
 export function stopMcpServers(): void {
   for (const srv of servers.values()) {
     srv.status = 'stopped'
-    try { srv.child?.kill('SIGTERM') } catch {}
+    if (srv.child) killTree(srv.child, 'SIGTERM')
   }
   servers.clear()
 }

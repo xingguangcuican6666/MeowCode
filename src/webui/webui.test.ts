@@ -43,6 +43,14 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     }
   })
 
+  // The server requires this run's token on every /api route (see server.ts).
+  // The served page embeds it; a test client passes it explicitly.
+  const api = (path: string, init: RequestInit = {}): Promise<Response> =>
+    fetch(`http://127.0.0.1:${testPort}${path}`, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', 'X-MeowCode-Token': instance.token, ...(init.headers ?? {}) },
+    })
+
   it('serves the main HTML document with reserved extension slots', async () => {
     const res = await fetch(`http://127.0.0.1:${testPort}/`)
     expect(res.status).toBe(200)
@@ -107,7 +115,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('provides session state and session reset API', async () => {
-    const stateRes = await fetch(`http://127.0.0.1:${testPort}/api/session/state`)
+    const stateRes = await api(`/api/session/state`)
     expect(stateRes.status).toBe(200)
     const state: any = await stateRes.json()
     expect(state).toHaveProperty('sessionId')
@@ -116,7 +124,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(state.isRunning).toBe(false)
 
     // Reset session
-    const resetRes = await fetch(`http://127.0.0.1:${testPort}/api/session/reset`, { method: 'POST' })
+    const resetRes = await api(`/api/session/reset`, { method: 'POST' })
     expect(resetRes.status).toBe(200)
     const resetState: any = await resetRes.json()
     expect(resetState.sessionId).toBeDefined()
@@ -124,7 +132,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('lists tools and exposes tool schemas', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/api/tools`)
+    const res = await api(`/api/tools`)
     expect(res.status).toBe(200)
     const data: any = await res.json()
     expect(Array.isArray(data.tools)).toBe(true)
@@ -134,7 +142,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('lists active backend and frontend plugins', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/api/plugins`)
+    const res = await api(`/api/plugins`)
     expect(res.status).toBe(200)
     const data: any = await res.json()
     expect(Array.isArray(data.plugins)).toBe(true)
@@ -147,7 +155,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('routes custom plugin backend actions via /api/plugins/:id/:action', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/api/plugins/test-custom-plugin/ping`, {
+    const res = await api(`/api/plugins/test-custom-plugin/ping`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: 'hello from test' }),
@@ -162,7 +170,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
   })
 
   it('supports workspace-files explorer plugin route', async () => {
-    const res = await fetch(`http://127.0.0.1:${testPort}/api/plugins/workspace-files/tree`, {
+    const res = await api(`/api/plugins/workspace-files/tree`, {
       method: 'POST',
     })
     expect(res.status).toBe(200)
@@ -174,12 +182,12 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
 
   it('supports renaming and deleting sessions via API', async () => {
     // 1. Get current session
-    const stateRes = await fetch(`http://127.0.0.1:${testPort}/api/session/state`)
+    const stateRes = await api(`/api/session/state`)
     const state: any = await stateRes.json()
     const sid = state.sessionId
 
     // 2. Rename the session
-    const renameRes = await fetch(`http://127.0.0.1:${testPort}/api/session/rename`, {
+    const renameRes = await api(`/api/session/rename`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: sid, title: 'Renamed Session Title' }),
@@ -190,7 +198,7 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(renameData.title).toBe('Renamed Session Title')
 
     // 3. Delete the session
-    const deleteRes = await fetch(`http://127.0.0.1:${testPort}/api/session/delete`, {
+    const deleteRes = await api(`/api/session/delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: sid }),

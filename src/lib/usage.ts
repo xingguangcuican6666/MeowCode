@@ -30,6 +30,33 @@ const CONTEXT_LIMITS: Array<[RegExp, number]> = [
 ]
 const DEFAULT_CONTEXT = 200_000
 
+// Built-in model → max OUTPUT tokens for one response. This is the `max_tokens`
+// we ask for: too low and a long answer (or a big write_file argument) is cut
+// mid-JSON, which is how a tool call arrives with half its input. Matched like
+// CONTEXT_LIMITS — most specific first.
+const OUTPUT_LIMITS: Array<[RegExp, number]> = [
+  [/opus/i, 32_000],
+  [/sonnet/i, 64_000],
+  [/haiku/i, 32_000],
+  [/fable/i, 32_000],
+  [/claude-3-5/i, 8_192],
+  [/claude/i, 32_000],
+  [/gpt-5|gpt5|o[134](-|$)/i, 32_000],
+  [/gpt-4/i, 16_384],
+  [/gemini/i, 65_536],
+  [/deepseek|qwen|llama|mistral|mixtral/i, 8_192],
+]
+const DEFAULT_OUTPUT = 8_192
+
+/**
+ * Max output tokens to request for a model id. A conservative per-family table:
+ * unknown models get a safe 8k rather than a number the endpoint would reject.
+ */
+export function maxOutputTokens(model: string): number {
+  for (const [re, n] of OUTPUT_LIMITS) if (re.test(model)) return n
+  return DEFAULT_OUTPUT
+}
+
 // The built-in fallback window for a model id (no network).
 function builtinLimit(model: string): number {
   for (const [re, n] of CONTEXT_LIMITS) if (re.test(model)) return n

@@ -4,7 +4,7 @@ import { runTool, toolSchemas, type SpawnOpts, type SpawnResult } from '../tools
 import { decidePermission, isPermissionMode, matchPermissionRule, DENY_RULE_REASON, type PermissionMode } from '../tools/permission'
 import { loadHooks, runHooks } from '../lib/hooks'
 import { estimateTokens } from '../lib/tokens'
-import { contextLimit, AUTO_COMPACT_RATIO } from '../lib/usage'
+import { contextLimit, maxOutputTokens, AUTO_COMPACT_RATIO } from '../lib/usage'
 import { parseRetryCodes, sleep, backoffMs, parseRetryAfter } from './retry'
 import { type ApiBlock, type ApiMsg, toApiMessages, parseStream } from './wire'
 import { t } from '../lib/i18n'
@@ -50,6 +50,51 @@ export interface AnthropicOpts {
   refreshKey?: () => Promise<string | undefined>
   auth?: 'x-api-key' | 'bearer'   // request auth header style; default 'x-api-key'
   noKeyHint?: string   // message shown when no key resolves (overrides the default)
+  // Prompt caching (cache_control breakpoints). Defaults to on; set false for an
+  // endpoint known not to support it. A 400 blaming cache_control also disables it
+  // for the rest of that turn, so this is only needed to skip the first attempt.
+  promptCaching?: boolean
+}
+
+// ---- prompt caching ---------------------------------------------------------
+//
+// Three cache breakpoints per request (the API allows four): the tool schemas, the
+// system prompt, and the tail of the conversation. The first two are byte-identical
+// every turn, and the conversation only ever grows at the end, so each step re-reads
+// the previous step's prefix from cache instead of re-sending it as fresh input.
+
+/** Mark the last tool schema, so the whole tool block is a cache prefix. */
+function withToolCache(tools: unknown[], caching: boolean): unknown[] {
+  if (!caching || tools.length === 0) return tools
+  const out = tools.slice()
+  out[out.length - 1] = { ...(out[out.length - 1] as Record<string, unknown>), cache_control: { type: 'ephemeral' } }
+  return out
+}
+
+/**
+ * Copy `convo` with a breakpoint on the final message's last content block, so the
+ * NEXT step (which appends after it) reads this whole history from cache. Copies
+ * rather than mutates: a breakpoint left in the stored conversation would ride
+ * along every later request and blow the four-breakpoint limit.
+ */
+function withConvoCache(convo: ApiMsg[]): ApiMsg[] {
+  if (convo.length === 0) return convo
+  const out = convo.slice()
+  const last = out[out.length - 1]
+  const mark = { cache_control: { type: 'ephemeral' } }
+  if (typeof last.content === 'string') {
+    out[out.length - 1] = { ...last, content: [{ type: 'text', text: last.content, ...mark }] as unknown as ApiBlock[] }
+    return out
+  }
+  if (!Array.isArray(last.content) || last.content.length === 0) return out
+  const blocks = last.content.slice()
+  // A thinking block can't carry cache_control; step back to one that can.
+  let i = blocks.length - 1
+  while (i >= 0 && (blocks[i].type === 'thinking' || blocks[i].type === 'redacted_thinking')) i--
+  if (i < 0) return out
+  blocks[i] = { ...blocks[i], ...mark } as ApiBlock
+  out[out.length - 1] = { ...last, content: blocks }
+  return out
 }
 
 // Normalize a host base to the Messages endpoint — "/v1/messages" is appended
@@ -313,7 +358,9 @@ async function* agent(messages: Message[], opts: StreamOpts, cfg: AnthropicOpts,
     ? undefined
     : async (sp) => {
         const subMessages: Message[] = [{ id: 'sub-user', role: 'user', content: sp.prompt }]
-        const subOpts: StreamOpts = { model: opts.model, system: sp.system, signal: sp.signal ?? opts.signal, retryStatusCodes: opts.retryStatusCodes, retryMaxAttempts: opts.retryMaxAttempts, continueAtUsageLimit: opts.continueAtUsageLimit, switchModelOnFlag: opts.switchModelOnFlag, fallbackModel: opts.fallbackModel, permissionMode: opts.permissionMode, autoModeInPlan: opts.autoModeInPlan, rewind: opts.rewind, permissionRules: opts.permissionRules }
+        // `sp.model`/`sp.tools` come from a custom sub-agent type's front-matter and
+        // are ENFORCED: the model it runs on, and the only tool schemas it is sent.
+        const subOpts: StreamOpts = { model: sp.model || opts.model, system: sp.system, signal: sp.signal ?? opts.signal, retryStatusCodes: opts.retryStatusCodes, retryMaxAttempts: opts.retryMaxAttempts, continueAtUsageLimit: opts.continueAtUsageLimit, switchModelOnFlag: opts.switchModelOnFlag, fallbackModel: opts.fallbackModel, permissionMode: opts.permissionMode, autoModeInPlan: opts.autoModeInPlan, rewind: opts.rewind, permissionRules: opts.permissionRules, allowedTools: sp.tools }
         let text = ''
         let lastText = ''
         let steps = 0
@@ -339,6 +386,12 @@ async function* agent(messages: Message[], opts: StreamOpts, cfg: AnthropicOpts,
         // still sees what was done. NOT flagged as an error: the sub-agent completed.
         return { text: traceReport(trace, steps), steps }
       }
+
+  // Prompt caching (cache_control breakpoints on the system prompt, the tool
+  // schemas and the conversation tail) is on by default and turned OFF for the
+  // rest of the turn if the endpoint rejects it — a user's Anthropic-protocol
+  // proxy may not implement it, and that must degrade rather than fail the turn.
+  let caching = cfg.promptCaching !== false
 
   // At most one forced token refresh per turn (on a 401), so an unrecoverable
   // auth failure surfaces as an error instead of looping. OAuth logins only.
@@ -381,22 +434,28 @@ async function* agent(messages: Message[], opts: StreamOpts, cfg: AnthropicOpts,
     // Extended thinking is opt-in via /effort (high+). Never for sub-agents (keep
     // them lean). max_tokens must exceed the thinking budget, so add headroom.
     const think = !sub && opts.thinkingBudget && opts.thinkingBudget >= 1024 ? opts.thinkingBudget : 0
-    const body = {
+    // Ask for the model's real output budget. The old flat 4096 cut long answers
+    // and — worse — truncated a big tool argument mid-JSON. Thinking tokens come
+    // out of the same budget, so they're added on top.
+    const outBudget = maxOutputTokens(activeModel)
+    const buildBody = (): Record<string, unknown> => ({
       model: activeModel,
-      max_tokens: think ? think + 4096 : 4096,
+      max_tokens: think ? think + outBudget : outBudget,
       stream: true,
       // Drop tools on the forced-summary step so the model can only answer in prose.
-      ...(summaryOnly ? {} : { tools: toolSchemas(!sub, opts.dynamicWorkflows !== false, cwd, permMode === 'plan' && !sub) }),
+      ...(summaryOnly ? {} : { tools: withToolCache(toolSchemas(!sub, opts.dynamicWorkflows !== false, cwd, permMode === 'plan' && !sub, opts.allowedTools), caching) }),
       ...(think ? { thinking: { type: 'enabled', budget_tokens: think } } : {}),
-      ...(opts.system ? { system: opts.system } : {}),
-      messages: convo,
-    }
+      ...(opts.system ? { system: caching ? [{ type: 'text', text: opts.system, cache_control: { type: 'ephemeral' } }] : opts.system } : {}),
+      messages: caching ? withConvoCache(convo) : convo,
+    })
+    let body = buildBody()
 
     // One request + SSE stream per step, wrapped in bounded backoff retries that
     // cover BOTH the connection and the streaming read, so a transient failure is
     // retried (announced via `retry`) and a fatal one ends the turn via `error`.
     let blocks: ApiBlock[] = []
     let stopReason = 'end_turn'
+    let badToolInputs: string[] = []
     let streamed = false
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       let res: Response
@@ -459,20 +518,29 @@ async function* agent(messages: Message[], opts: StreamOpts, cfg: AnthropicOpts,
             continue
           }
         }
+        // The endpoint doesn't understand cache_control (a proxy, an older
+        // gateway): drop caching and redo this step. Doesn't consume the retry
+        // budget — nothing transient failed, we just asked for too much.
+        if (caching && status === 400 && /cache_control|cache control/i.test(errText)) {
+          caching = false
+          body = buildBody()
+          attempt--
+          continue
+        }
         if (!shouldRetry(status) || attempt >= maxAttempts - 1) { yield { type: 'error', message: `API error ${status}: ${errText.slice(0, 400)}` }; return }
         const delay = backoffMs(attempt, parseRetryAfter(res.headers.get('retry-after')))
         yield { type: 'retry', attempt: attempt + 1, max: maxAttempts, delayMs: delay, reason: `HTTP ${status}` }
         await sleep(delay, opts.signal); if (opts.signal?.aborted) return
         continue
       }
-      blocks = []; stopReason = 'end_turn'
+      blocks = []; stopReason = 'end_turn'; badToolInputs = []
       let stepStreamed = false
       try {
         for await (const ev of parseStream(res, opts.signal)) {
           if (ev.type === 'text') { stepStreamed = true; yield { type: 'text', text: ev.text } }
           else if (ev.type === 'thinking') { stepStreamed = true; yield { type: 'thinking', text: ev.text } }
           else {
-            blocks = ev.blocks; stopReason = ev.stopReason
+            blocks = ev.blocks; stopReason = ev.stopReason; badToolInputs = ev.badToolInputs
             yield { type: 'usage', inputTokens: ev.usage.input, outputTokens: ev.usage.output, cacheReadTokens: ev.usage.cacheRead, cacheCreationTokens: ev.usage.cacheCreation }
           }
         }
@@ -581,13 +649,22 @@ async function* agent(messages: Message[], opts: StreamOpts, cfg: AnthropicOpts,
         results.push({ type: 'tool_result', tool_use_id: tu.id, content: outcome.content, is_error: outcome.isError })
         continue
       }
+      // Arguments that never parsed (response cut at max_tokens mid-JSON): report
+      // the truncation instead of running the tool with an empty input, which would
+      // silently fall back to defaults (a pathless list_dir, an argument-less edit).
+      if (badToolInputs.includes(tu.id)) {
+        const why = `工具参数不完整：模型的输出在 JSON 中途被截断（stop_reason: ${stopReason}）。本次调用未执行。请用更小的参数重试，例如把一次大的 write_file 拆成若干 edit_file。`
+        yield { type: 'tool_result', id: tu.id, name: tu.name, content: why, isError: true }
+        results.push({ type: 'tool_result', tool_use_id: tu.id, content: why, is_error: true })
+        continue
+      }
       // Permission gate: decide whether this tool may run under the current mode.
       // 'deny' (plan-mode mutation, or the user declined) short-circuits — the
       // reason is fed back as an error tool_result so the model adapts instead of
       // the tool actually running; 'ask' prompts the user via requestPermission.
       // A PreToolUse hook that returned "allow" skips this gate.
       let decision: { action: 'allow' } | { action: 'ask' } | { action: 'deny'; reason: string } =
-        hookAllow ? { action: 'allow' } : decidePermission(permMode, tu.name, { autoModeInPlan: opts.autoModeInPlan, sub })
+        hookAllow ? { action: 'allow' } : decidePermission(permMode, tu.name, { autoModeInPlan: opts.autoModeInPlan, sub, input: tu.input })
       // Persistent permission rules modulate that decision: a matching `deny`
       // always blocks (overriding a hook/mode allow — a user's explicit veto), an
       // `allow` skips a prompt the mode would raise, and an `ask` forces a prompt
@@ -605,10 +682,19 @@ async function* agent(messages: Message[], opts: StreamOpts, cfg: AnthropicOpts,
       let denyReason: string | undefined
       if (decision.action === 'deny') {
         denyReason = decision.reason
-      } else if (decision.action === 'ask' && opts.requestPermission) {
-        const verdict = await opts.requestPermission({ tool: tu.name, input: tu.input, summary: summarizeToolCall(tu.name, tu.input) })
-        if (opts.signal?.aborted) return
-        if (verdict === 'deny') denyReason = '用户拒绝了本次工具调用。请据此调整方案，或改用其它方式。'
+      } else if (decision.action === 'ask') {
+        if (opts.requestPermission) {
+          const verdict = await opts.requestPermission({ tool: tu.name, input: tu.input, summary: summarizeToolCall(tu.name, tu.input) })
+          if (opts.signal?.aborted) return
+          if (verdict === 'deny') denyReason = '用户拒绝了本次工具调用。请据此调整方案，或改用其它方式。'
+        } else {
+          // Nobody can be asked: a sub-agent (no dialog) or a non-interactive run
+          // (print mode, CI). "Can't ask" must mean "don't do it" — silently running
+          // a call the mode wanted confirmed is exactly the gate failing open.
+          denyReason = sub
+            ? 'Sub-agent 无法调用需要权限确认的工具。请在父 agent 中执行该操作，或改用只读工具。'
+            : '本次运行是非交互的（无法弹出授权确认），因此需要确认的工具调用被拒绝。请改用只读工具，或以 --permission-mode acceptEdits / bypassPermissions 重新运行。'
+        }
       }
       if (denyReason) {
         yield { type: 'tool_result', id: tu.id, name: tu.name, content: denyReason, isError: true }
@@ -659,7 +745,9 @@ async function complete(messages: Message[], opts: StreamOpts, cfg: AnthropicOpt
   if (!apiKey) throw new Error(`no ${cfg.apiKeyEnv || 'ANTHROPIC_API_KEY'}`)
   const body = {
     model: opts.model,
-    max_tokens: 1024,
+    // 1024 truncated compaction summaries (losing the "long-term instructions"
+    // section they are supposed to carry). This is a cap, not a target.
+    max_tokens: Math.min(8_192, maxOutputTokens(opts.model)),
     ...(opts.system ? { system: opts.system } : {}),
     messages: toApiMessages(messages),
   }

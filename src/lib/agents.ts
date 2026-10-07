@@ -16,9 +16,13 @@ export interface CustomAgent {
   description: string
   /** The system prompt for this sub-agent (the Markdown body). */
   prompt: string
-  /** Optional allow-list of tool names the sub-agent may use (advisory). */
+  /**
+   * Optional allow-list of tool names the sub-agent may use. ENFORCED: it becomes
+   * the only tool schemas the sub-agent is sent (see tools/index toolSchemas).
+   * Claude Code's spellings (Read, Edit, Bash) and `mcp__server__*` globs work.
+   */
   tools?: string[]
-  /** Optional model override for this sub-agent (advisory). */
+  /** Optional model this sub-agent runs on. Enforced at spawn. */
   model?: string
   /** Absolute path to the source .md file. */
   source: string

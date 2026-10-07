@@ -61,8 +61,47 @@ npm run start       # node dist/cli.js
   the other pickers), then `reportMergeOutcome` writes the one-line result on the
   normal screen. `legacyDir.ts` stays Ink-free — `offerLegacyMigration(ask)` takes
   the answer as a callback, so the unit tests drive it without a terminal.
+- **Project config is not trusted by default.** A repository's own
+  `.meowcode/settings.json` can declare `hooks` and `mcpServers` — shell commands
+  and processes. Those stay inert until the user runs `/trust add` in that
+  directory; the user's own `~/.meowcode/settings.json` is unaffected. Trust lives
+  in `~/.meowcode/trust.json` (0600) and is pinned to the settings file's
+  mtime+size, so an edit (a pull, a teammate's commit) re-arms the gate rather
+  than riding on the old decision. `src/lib/trust.ts`; the startup notice exists
+  so a legitimate project's hooks don't just look broken.
+- **Every child process goes through `src/lib/shell.ts`** (`runCaptured`,
+  `spawnShell`, `spawnFile`, `killTree`): the child leads its own process group so
+  a timeout/abort/exit kills the whole tree, output is kept as a bounded
+  head+tail window, and stdin is `/dev/null` unless the caller pipes input. Don't
+  call `child_process.spawn` directly for anything that runs a command line —
+  `bash`, background shells, monitors, hooks, the status line and MCP all route
+  here.
+- **`web_fetch`/`web_search` are guarded** by `src/lib/net.ts`: the host is
+  resolved and every answer checked against loopback/private/CGNAT/link-local/
+  metadata ranges (IPv4-mapped and NAT64 wrappers included), redirects are followed
+  manually and re-validated per hop, and the body is read through a 5 MB cap and
+  decoded with the declared charset. `MEOWCODE_ALLOW_PRIVATE_FETCH=1` opts out for
+  pointing the agent at a local dev server.
+- **The WebUI requires a token.** `startWebUI` mints a per-run secret; every
+  `/api/*` route demands it (header, `Bearer`, or `?token=`) and the served page
+  embeds it, so opening the printed URL just works. Responses echo only our own
+  Origin (never `*`), foreign-origin preflights are refused, and the `Host` header
+  must name the address we bound to (anti DNS-rebinding). This matters because the
+  bridge runs the agent with `bypassPermissions` and `/api/tools/call` reaches any
+  tool. `auth: false` disables it for a trusted, isolated context.
 - UI language is i18n'd (zh/en/auto) — see `src/lib/i18n.ts`; the codebase has
   substantial Chinese comments and some Chinese UI strings.
+- **Search boxes match in both languages at once**, not just the language on
+  screen: `src/lib/search.ts` (`rankMatches`, `hitQuality`) matches a row's zh
+  label/description *and* its en ones, so `lang` finds 「语言」 on a Chinese UI and
+  「语言」 finds *Language* on an English one. CJK is matched as a subsequence
+  (「言设」 finds 「语言设置」) and ranked by how tightly the characters sit
+  together; ASCII gets exact/prefix/word-boundary/substring tiers. The surface is
+  label + description only — never setting group names, keys, provider ids or
+  file paths. Callers hand it every textual form via `bothLangs(key)`; `/config`
+  (`SettingsPanel.tsx`) and the `/` menu (`PromptInput.tsx`) are the two
+  consumers. Model pickers and workspace-file filtering are left alone: those
+  filter machine identifiers and paths, which have only one spelling.
 
 ### Entries (front-ends)
 
@@ -178,7 +217,7 @@ src/
     plugins/            showcase plugins: workspace-files, tools-inspector, prompt-templates, metrics-monitor
     client/             SPA HTML layout, Vanilla CSS design system, window.MeowSDK client, app logic
   lib/                  ~60 leaf modules (agents, mcp, sessions, transcript, i18n,
-                        compact, summarize, usage, tokens, mentions, hooks, …)
+                        search, compact, summarize, usage, tokens, mentions, hooks, …)
 ```
 
 The **agent loop** lives in `src/providers/anthropic.ts` (`agent(...)`): it builds
@@ -226,6 +265,31 @@ custom panels, tool visualizers, `window.MeowSDK` (with `sdk.theme`, `sdk.slots`
 - `exit_plan_mode` only surfaces in plan mode (`toolSchemas(..., planMode)`); the
   `workflow` tool is dropped when `dynamicWorkflows` is off; `task`/`plan`/`workflow`
   are withheld from sub-agents to cap nesting at one level.
+- **"Can't ask" means "don't do it".** When a tool call needs confirmation and
+  there is nobody to confirm — a sub-agent (no dialog) or a non-interactive run
+  (`-p`, CI) — the provider DENIES it and says so in the tool result. It used to
+  run anyway. A script that needs autonomy passes `--permission-mode`.
+- **`acceptEdits` is scoped to the workspace.** It auto-accepts edits only under
+  the cwd, and never inside `.git/`, `.meowcode/`, or a shell rc file — those
+  prompt. Previously any absolute path was auto-accepted, `~/.bashrc` included.
+- **"Always allow" is scoped to the shape of the call** (`src/lib/allowScope.ts`),
+  not the whole tool: `bash` generalizes to its leading command words (`npm test`),
+  file tools to the directory, `web_fetch` to the host. A command containing shell
+  metacharacters never generalizes, so `npm test && rm -rf /` can't teach the
+  session to allow "npm test".
+- **A sub-agent type's `tools:`/`model:` front-matter is enforced**, not advisory:
+  it becomes the only tool schemas that sub-agent is sent (`toolSchemas(...,
+  allowed)`), and the built-in `explore`/`plan` roles are likewise restricted to a
+  read-only toolset — their prompts say "do not modify files", and a prompt is a
+  request, not a restriction.
+- **A tool call whose argument JSON was truncated is never executed.** `parseStream`
+  reports those ids in `badToolInputs` and the loop returns an error result instead
+  of running the tool with an empty input (which would silently fall back to
+  defaults). `max_tokens` now comes from `maxOutputTokens(model)` rather than a flat
+  4096, which is what made truncation common.
+- **Session ids are validated before they become filenames** (`isValidSessionId`):
+  they arrive from `--resume` and the WebUI's load/rename/delete bodies, and
+  `../../../x` would otherwise reach a `.json` outside `sessions/`.
 - Mid-turn auto-compaction and context-overflow retry are implemented in
   `providers/anthropic.ts` (`compactConvo`, `pickCut`, `MAX_STEPS = 1000`) — do not
   assume Claude's exact thresholds there.

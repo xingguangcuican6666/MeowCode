@@ -51,6 +51,9 @@ import { setGoal } from './lib/memory'
 import { setScheduleSink, clearJobs } from './lib/scheduler'
 import { setMonitorSink, clearMonitors } from './lib/monitor'
 import { clearBgShells } from './lib/bgshell'
+import { clearReadState } from './lib/readState'
+import { pendingTrust } from './lib/trust'
+import { AllowList, scopeFor, describeScope } from './lib/allowScope'
 import { restoreToTimestamp, clearCheckpoints } from './lib/checkpoints'
 import { startMcpServers, stopMcpServers } from './lib/mcp'
 import { judgeGoal } from './lib/goalJudge'
@@ -147,7 +150,13 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
   // place of the input box and calls `resolve` with the user's decision. Null =
   // no prompt. Rendered while streaming (a tool call is mid-turn), so it is NOT
   // part of `modalOpen`; it takes the input slot like the /effort picker.
-  const [permReq, setPermReq] = useState<{ req: PermissionRequest; resolve: (v: 'allow' | 'deny') => void } | null>(null)
+  // A QUEUE, not one slot: two tool calls can need approval in the same turn (a
+  // parallel pair, a sub-agent's call arriving while another waits), and a single
+  // slot meant the second overwrote the first — whose promise then never resolved
+  // and the turn hung. The head of the queue is the prompt on screen; answering it
+  // shifts and the next one renders.
+  const [permQueue, setPermQueue] = useState<Array<{ req: PermissionRequest; resolve: (v: 'allow' | 'deny') => void }>>([])
+  const permReq = permQueue[0] ?? null
   // A pending ask_user prompt (the `ask_user` tool). Like permReq it holds the
   // request and the provider's resolver, and renders an inline AskUserDialog in
   // the input slot; the resolver gets the user's structured answer. Null = none.
@@ -249,7 +258,10 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
   // chose to "always allow" — those auto-resolve without re-prompting.
   const permReqRef = useRef(permReq); permReqRef.current = permReq
   const userReqRef = useRef(userReq); userReqRef.current = userReq
-  const permAllowRef = useRef<Set<string>>(new Set())
+  // "Always allow" grants for this session, each scoped to the SHAPE of the call
+  // that was approved (see lib/allowScope) — approving `npm test` once must not
+  // hand over every later `bash`.
+  const permAllowRef = useRef<AllowList>(new AllowList())
   const scrollTopRef = useRef<number | null>(scrollTop); scrollTopRef.current = scrollTop
   // Terminal focus state, tracked from focus-reporting events (\x1b[I / \x1b[O,
   // enabled via ?1004h in cli.tsx). Drives the `localNotifications` setting so we
@@ -887,6 +899,16 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
     return () => stopMcpServers()
   }, [])
 
+  // Project-config trust (see lib/trust): a repository's own hooks/mcpServers stay
+  // inert until the user trusts the directory. Say so once, or the gate is silent
+  // and a legitimate project's hooks just look broken.
+  useEffect(() => {
+    const pending = pendingTrust(process.cwd())
+    if (!pending) return
+    const count = pending.hooks + pending.mcpServers.length
+    chatRef.current.print(t('trust.pending', { count: String(count) }), 'system')
+  }, [])
+
   // Auto-update check (the `autoUpdateChannel` setting): on startup — and when the
   // channel changes — query the release registry in the background and, when a
   // newer build exists on that channel, surface a one-line footer banner. Never
@@ -1322,7 +1344,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
     exit,
     // A brand-new session drops every session-scoped timer too: pending scheduled
     // jobs and running monitors belong to the old conversation, not the new one.
-    clear: () => { clearJobs(); clearMonitors(); clearBgShells(); clearCheckpoints(); onClear(chatRef.current.config) },
+    clear: () => { clearJobs(); clearMonitors(); clearBgShells(); clearCheckpoints(); clearReadState(); permAllowRef.current.clear(); onClear(chatRef.current.config) },
     // /fork: branch the live conversation — freeze the original on disk and keep
     // going in a fresh session file (see cli.tsx onFork). No timers are cleared:
     // the fork continues the same conversation, so its scheduled jobs/monitors
@@ -1411,7 +1433,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
     // has "always allowed" this session runs without prompting; otherwise we raise
     // the inline dialog and resolve once they choose (see PermissionDialog render).
     requestPermission: (req: PermissionRequest): Promise<'allow' | 'deny'> => {
-      if (permAllowRef.current.has(req.tool)) return Promise.resolve('allow')
+      if (permAllowRef.current.covers(req.tool, req.input)) return Promise.resolve('allow')
       // Honor a permission-mode switch made AFTER this turn started. The provider
       // captures permissionMode once at turn start (anthropic.ts), so a mid-turn
       // shift+tab to bypassPermissions (or acceptEdits) wouldn't otherwise take
@@ -1426,7 +1448,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
       })
       if (live.action === 'allow') return Promise.resolve('allow')
       if (live.action === 'deny') return Promise.resolve('deny')
-      return new Promise<'allow' | 'deny'>((resolve) => setPermReq({ req, resolve }))
+      return new Promise<'allow' | 'deny'>((resolve) => setPermQueue((q) => [...q, { req, resolve }]))
     },
     // Interactive structured-question prompt (the `ask_user` tool): raise the
     // inline AskUserDialog and resolve once the user answers or dismisses it.
@@ -1871,12 +1893,14 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
                 mode={String(getSetting(chat.config.settings, 'permissionMode') || 'default')}
                 width={width}
                 autoContinueSecs={Number(getSetting(chat.config.settings, 'questionTimeout')) || 0}
+                alwaysLabel={describeScope(scopeFor(permReq.req.tool, permReq.req.input))}
                 onDecide={(choice: PermissionChoice) => {
                   const cur = permReq
                   if (!cur) return
-                  if (choice === 'always') permAllowRef.current.add(cur.req.tool)
+                  if (choice === 'always') permAllowRef.current.add(scopeFor(cur.req.tool, cur.req.input))
                   cur.resolve(choice === 'deny' ? 'deny' : 'allow')
-                  setPermReq(null)
+                  // Drop THIS entry (identity, not index: the queue may have grown).
+                  setPermQueue((q) => q.filter((e) => e !== cur))
                 }}
               />
             ) : userReq ? (

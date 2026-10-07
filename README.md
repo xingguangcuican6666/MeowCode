@@ -36,14 +36,57 @@ meowcode -p "explain this repo"
 echo "write a haiku about tps reports" | meowcode
 ```
 
+Print mode runs the same agent as a session — your tools, hooks and project
+instruction files (`MEOWCODE.md`/`CLAUDE.md`/`AGENTS.md`) all apply — and exits
+non-zero if the run fails, so a script can check it.
+
+There is no way to answer a permission prompt in a non-interactive run, so a tool
+call that would have asked is **denied**. Grant autonomy explicitly:
+
+```bash
+meowcode -p "fix the failing test" --permission-mode acceptEdits
+```
+
+`--permission-mode` takes `default`, `acceptEdits`, `plan` or `bypassPermissions`.
+
+## Trusting a project
+
+A repository can ship its own `.meowcode/settings.json` declaring `hooks` (shell
+commands run on lifecycle events) and `mcpServers` (processes started with the
+session). MeowCode does **not** run those just because you opened the directory —
+cloning a repo would otherwise be enough to execute its author's commands. Read
+the file, then:
+
+```bash
+/trust          # what this project declares, and whether it may run
+/trust add      # allow it
+/trust remove   # revoke
+/trust list     # every directory you've trusted
+```
+
+Trust is pinned to the settings file as you reviewed it: if it changes later, the
+gate comes back. Your own `~/.meowcode/settings.json` is never gated.
+
 ## Commands
 
-`/help` · `/model <id>` · `/provider <mock|anthropic>` · `/config` · `/entry` · `/clear` · `/version` · `/exit`
+`/help` · `/model <id>` · `/provider <mock|anthropic>` · `/config` · `/trust` · `/entry` · `/clear` · `/version` · `/exit`
+
+## Language
+
+The interface speaks Chinese and English; `/config` → `language` picks one, or
+`auto` to follow your shell locale.
+
+Search boxes match **both** languages regardless of what is on screen — in
+`/config` and after `/` you can type `lang` to find 「语言」 on a Chinese UI, or
+「语言」 to find *Language* on an English one. Descriptions are searched too, not
+just names, and Chinese matches loosely: 「言设」 still finds 「语言设置」.
 
 ## Config location
 
 All user state lives in `~/.meowcode/` — `settings.json`, `sessions/`,
-`memory/`, `credentials.json`, `history.json`, and `entries/`.
+`memory/`, `credentials.json`, `trust.json`, `history.json`, and `entries/`.
+API keys are never written to disk; `credentials.json` and `trust.json` are
+written `0600`.
 
 This tool was called **AnyCode** before; its config directory was `~/.anycode`.
 That directory is no longer read. On the next interactive start, if `~/.anycode`

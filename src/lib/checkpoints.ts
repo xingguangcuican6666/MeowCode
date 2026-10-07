@@ -8,6 +8,7 @@
 // the same process, so both share it. It lives for the session only (a fresh
 // process starts empty) — snapshots are not persisted to disk.
 import fs from 'node:fs'
+import { noteFileState } from './readState'
 
 export interface Checkpoint {
   id: number
@@ -50,9 +51,13 @@ export function restoreCheckpoint(id: number): RestoreResult {
   try {
     if (cp.before === null) {
       fs.rmSync(cp.path, { force: true })
+      // File deleted: clear its readState so future writes don't see stale mtime
+      noteFileState(cp.path)
       return { ok: true, path: cp.path, action: 'deleted' }
     }
     fs.writeFileSync(cp.path, cp.before, 'utf8')
+    // File restored: update readState with the new mtime so future edits know the current state
+    noteFileState(cp.path)
     return { ok: true, path: cp.path, action: 'restored' }
   } catch (e) {
     return { ok: false, path: cp.path, error: (e as Error).message }

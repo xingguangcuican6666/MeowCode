@@ -36,7 +36,8 @@
 // - Hooks fire only when the ENTRY brings them (loadHooks reads the same
 //   layered configs the TUI reads); there is no user to answer ask_user, so
 //   requestUserInput is absent and the tool reports that on its own.
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { spawnFile, killTree } from './shell'
 import readline from 'node:readline'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -398,7 +399,10 @@ export function readLauncherConfig(dir: string): LauncherConfig | null {
 // plugin (webui: a browser tab) renders its own way and exits when the user is
 // done; the final autosave lands the transcript in sessions/ either way.
 export async function runLauncher(cfg: LauncherConfig, config: AppConfig): Promise<number> {
-  const child = spawn(cfg.command, cfg.args ?? [], {
+  // A tracked process-group leader (lib/shell): a launcher that forks its own
+  // server — the webui does exactly this — leaves orphans behind when only the
+  // direct child is signalled, and those orphans keep the port bound.
+  const child = spawnFile(cfg.command, cfg.args ?? [], {
     cwd: cfg.cwd || process.cwd(),
     env: { ...process.env, ...(cfg.env ?? {}) } as NodeJS.ProcessEnv,
     stdio: ['pipe', 'pipe', 'inherit'],
@@ -447,7 +451,10 @@ export async function runLauncher(cfg: LauncherConfig, config: AppConfig): Promi
     })
   } catch (e) {
     process.stderr.write(`launcher handshake failed: ${e instanceof Error ? e.message : e}\n`)
-    child.kill('SIGTERM')
+    killTree(child, 'SIGTERM')
+    // Escalate if the tree ignores SIGTERM, so a wedged launcher can't hold the
+    // terminal open after we've given up on it.
+    setTimeout(() => killTree(child, 'SIGKILL'), 2000).unref()
   }
 
   const code = await exited

@@ -30,7 +30,14 @@ import { readLauncherConfig, runLauncher } from './lib/launcher'
 import { CONFIG_DIR, offerLegacyMigration, reportMergeOutcome, type LegacyDirInfo } from './lib/legacyDir'
 import { LegacyDirDialog, type LegacyChoice } from './components/LegacyDirDialog'
 import { getTheme, ThemeProvider } from './theme'
-import { getSetting } from './lib/settings'
+import {
+  getSetting, effortDirective, outputStyleDirective, workflowSizeDirective, resolveThinkingBudget,
+} from './lib/settings'
+import { AGENT_SYSTEM } from './hooks/chat-helpers'
+import { standingPreamble } from './lib/memory'
+import { projectInstructionsPreamble } from './lib/projectInstructions'
+import { customAgentCatalog } from './tools/orchestration'
+import { isPermissionMode, PERMISSION_MODES } from './tools/permission'
 import { LangProvider, resolveLang, setLang } from './lib/i18n'
 
 const argv = process.argv.slice(2)
@@ -80,6 +87,8 @@ Options:
       --no-open          Do not automatically open the browser in web mode
       --model <id>       Model to use for this run
       --provider <id>    Provider to use (mock | anthropic)
+      --permission-mode <m>  Permission mode for a -p run
+                             (default | acceptEdits | plan | bypassPermissions)
       --entry <name>      Start the named entry (a front-end of its own)
   -h, --help             Show this help
   -v, --version          Show the version
@@ -98,13 +107,95 @@ Environment:
 `)
 }
 
-async function runPrint(prompt: string, config: AppConfig): Promise<void> {
+/**
+ * Print mode (`-p` / piped stdin): one prompt, one answer, no TUI. This runs the
+ * SAME agent loop as a session — tools, hooks, permission gating, the project's
+ * instruction files — because a `-p` run that silently lacked MEOWCODE.md (or ran
+ * tools ungated) is not the same agent the user tested interactively.
+ *
+ * Non-interactive means no permission dialog, so the provider denies any call the
+ * mode wanted confirmed; `--permission-mode` is how a script opts into autonomy.
+ * Returns the process exit code: non-zero when the turn ended in an error.
+ */
+async function runPrint(prompt: string, config: AppConfig): Promise<number> {
   const provider = getProvider(config)
   const messages = [{ id: 'u1', role: 'user' as const, content: prompt }]
-  for await (const chunk of provider.stream(messages, { model: config.model, system: config.system })) {
-    process.stdout.write(chunk)
+  const cwd = process.cwd()
+
+  // Same system prompt the interactive session assembles (see useChat): agent
+  // base prompt, effort/output-style directives, standing memory, the project's
+  // instruction files, and any custom sub-agent catalog.
+  const effortLevel = String(getSetting(config.settings, 'effort'))
+  const allowWorkflows = getSetting(config.settings, 'dynamicWorkflows') !== false
+  const agentCatalog = customAgentCatalog(cwd)
+  const system = [
+    AGENT_SYSTEM,
+    effortDirective(effortLevel),
+    outputStyleDirective(String(getSetting(config.settings, 'outputStyle'))),
+    allowWorkflows ? workflowSizeDirective(String(getSetting(config.settings, 'dynamicWorkflowSize'))) : undefined,
+    standingPreamble(),
+    projectInstructionsPreamble(cwd),
+    agentCatalog ? `## Custom sub-agents\nThese project-defined sub-agents are available as \`subagent_type\`:\n${agentCatalog}` : undefined,
+    config.system,
+  ].filter(Boolean).join('\n\n')
+
+  // `--permission-mode` overrides the stored setting for this run only.
+  const flagMode = flagValue('--permission-mode')
+  if (flagMode && !isPermissionMode(flagMode)) {
+    process.stderr.write(`Error: --permission-mode must be one of ${PERMISSION_MODES.join(', ')}.\n`)
+    return 1
   }
-  process.stdout.write('\n')
+  const permissionMode = flagMode || String(getSetting(config.settings, 'permissionMode') || 'default')
+
+  const controller = new AbortController()
+  const onSignal = (): void => controller.abort()
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+
+  let failed = false
+  try {
+    // No provider.agent (the mock provider): plain text stream, no tools.
+    if (!provider.agent) {
+      for await (const chunk of provider.stream(messages, { model: config.model, system, signal: controller.signal })) {
+        process.stdout.write(chunk)
+      }
+      process.stdout.write('\n')
+      return 0
+    }
+    for await (const ev of provider.agent(messages, {
+      model: config.model,
+      system,
+      signal: controller.signal,
+      thinkingBudget: resolveThinkingBudget(effortLevel, String(getSetting(config.settings, 'thinkingMode'))),
+      retryStatusCodes: String(getSetting(config.settings, 'retryStatusCodes')),
+      retryMaxAttempts: Number(getSetting(config.settings, 'retryMaxAttempts')) || undefined,
+      continueAtUsageLimit: getSetting(config.settings, 'continueAtUsageLimit') === true,
+      switchModelOnFlag: getSetting(config.settings, 'switchModelOnFlag') === true,
+      fallbackModel: String(getSetting(config.settings, 'fallbackModel') || '') || undefined,
+      dynamicWorkflows: allowWorkflows,
+      artifacts: getSetting(config.settings, 'artifacts') !== false,
+      rewind: false,
+      // Gated like a session, but with nothing to prompt WITH: an 'ask' decision is
+      // denied by the provider (and said so in the tool result), never auto-run.
+      permissionMode,
+      autoModeInPlan: getSetting(config.settings, 'autoModeInPlan') === true,
+      permissionRules: config.permissions,
+    })) {
+      if (ev.type === 'text') process.stdout.write(ev.text)
+      else if (ev.type === 'tool_use') process.stderr.write(`● ${ev.name}\n`)
+      else if (ev.type === 'tool_result' && ev.isError) process.stderr.write(`⚠ ${String(ev.content).slice(0, 400)}\n`)
+      else if (ev.type === 'error') { failed = true; process.stderr.write(`⚠ ${ev.message}\n`) }
+    }
+    process.stdout.write('\n')
+  } catch (e) {
+    failed = true
+    process.stderr.write(`⚠ ${(e as Error).message}\n`)
+  } finally {
+    process.off('SIGINT', onSignal)
+    process.off('SIGTERM', onSignal)
+  }
+  // An aborted run is a failure for a script that was waiting on the answer.
+  return failed || controller.signal.aborted ? 1 : 0
 }
 
 async function readStdin(): Promise<string> {
@@ -491,13 +582,13 @@ async function main(): Promise<void> {
       process.stderr.write('Error: -p/--print requires a prompt argument.\n')
       process.exit(1)
     }
-    await runPrint(prompt, config)
+    process.exitCode = await runPrint(prompt, config)
     return
   }
 
   if (!process.stdin.isTTY) {
     const piped = await readStdin()
-    if (piped) { await runPrint(piped, config); return }
+    if (piped) { process.exitCode = await runPrint(piped, config); return }
     process.stderr.write(
       'Error: no prompt provided and stdin is not a TTY.\n' +
       'Use `meowcode -p "<prompt>"`, pipe a prompt in, or start `meowcode` in an interactive terminal.\n',

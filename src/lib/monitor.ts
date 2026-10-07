@@ -8,7 +8,8 @@
 //
 // Module-level singleton so watchers OUTLIVE a turn (and an App remount): the app
 // re-registers its sink on mount. In-memory only; everything is killed on exit.
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { spawnShell, killTree } from './shell'
 
 export interface Monitor {
   id: string
@@ -65,7 +66,8 @@ function finish(m: Monitor, note: string): void {
   m.buf = ''
   m.coalesce.push(`[monitor ended: ${note}]`)
   flush(m)
-  try { m.child.kill('SIGTERM') } catch { /* already gone */ }
+  killTree(m.child, 'SIGTERM')
+  setTimeout(() => killTree(m.child, 'SIGKILL'), 2000).unref()
 }
 
 export interface MonitorOutcome { monitor?: Monitor; error?: string }
@@ -77,7 +79,7 @@ export function startMonitor(command: string, description?: string, timeoutMs?: 
   if (active >= MAX_MONITORS) return { error: `too many active monitors (max ${MAX_MONITORS}); stop some first` }
   const id = `mon${++seq}`
   const ttl = Math.min(MAX_TIMEOUT_MS, Math.max(1_000, timeoutMs ?? DEFAULT_TIMEOUT_MS))
-  const child = spawn('bash', ['-lc', command], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawnShell(command)
   const m: Monitor = {
     id, command, description: description || command.slice(0, 40), startedAt: Date.now(),
     events: 0, done: false, child, buf: '', coalesce: [], flushTimer: null,
@@ -114,7 +116,7 @@ export function clearMonitors(): void {
   for (const m of monitors.values()) {
     if (m.flushTimer) clearTimeout(m.flushTimer)
     clearTimeout(m.timer)
-    try { m.child.kill('SIGKILL') } catch { /* already gone */ }
+    killTree(m.child, 'SIGKILL')
   }
   monitors.clear()
 }

@@ -196,8 +196,12 @@ export const workspaceFilesPlugin: WebUIPlugin = {
     read: (_req, _res, body, ctx) => {
       const relPath = String(body?.path || '')
       if (!relPath) throw new Error('Path required')
-      const target = path.resolve(ctx.cwd, relPath)
-      if (!target.startsWith(path.resolve(ctx.cwd))) {
+      const root = path.resolve(ctx.cwd)
+      const target = path.resolve(root, relPath)
+      // Compare by path SEGMENTS, not string prefix: with root /p/proj, the string
+      // check also accepted /p/proj-secrets/… (a sibling directory, not a child).
+      const rel = path.relative(root, target)
+      if (rel !== '' && (rel.startsWith('..') || path.isAbsolute(rel))) {
         throw new Error('Access denied: path escapes workspace')
       }
       const stat = fs.statSync(target)

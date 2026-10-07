@@ -7,6 +7,9 @@
 // Modes: replace a cell's source (optionally changing its type), insert a new cell
 // after a given cell (or at the top), or delete a cell.
 import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import { noteRead, noteFileState, staleReason } from '../lib/readState'
 import type { ToolDef, ToolResult } from './types'
 
 type CellType = 'code' | 'markdown'
@@ -73,17 +76,29 @@ export const notebookEdit: ToolDef = {
     },
     required: ['notebook_path'],
   },
-  async run(input): Promise<ToolResult> {
-    const p = typeof input.notebook_path === 'string' ? input.notebook_path : ''
-    if (!p) return { content: 'notebook_edit: `notebook_path` is required', isError: true }
+  async run(input, ctx): Promise<ToolResult> {
+    const rawPath = typeof input.notebook_path === 'string' ? input.notebook_path : ''
+    if (!rawPath) return { content: 'notebook_edit: `notebook_path` is required', isError: true }
+    // Resolve to absolute path (supports relative paths and ~)
+    const cwd = ctx?.cwd ?? process.cwd()
+    const p = path.isAbsolute(rawPath) ? rawPath : path.resolve(cwd, rawPath.replace(/^~/, os.homedir()))
+
     const mode = (typeof input.edit_mode === 'string' ? input.edit_mode : 'replace') as 'replace' | 'insert' | 'delete'
     const cellId = typeof input.cell_id === 'string' ? input.cell_id : undefined
     const newSource = typeof input.new_source === 'string' ? input.new_source : ''
     const cellType = input.cell_type === 'code' || input.cell_type === 'markdown' ? (input.cell_type as CellType) : undefined
 
+    // Read-before-write check: refuse to edit a file never read or changed since last read
+    const stale = staleReason(p)
+    if (stale) return { content: `notebook_edit: ${stale}`, isError: true }
+
     let raw: string
+    let stat: fs.Stats
     try {
+      stat = fs.statSync(p)
       raw = fs.readFileSync(p, 'utf8')
+      // Record this read so future edits know the file was seen
+      noteRead(p, stat.mtimeMs)
     } catch (e) {
       return { content: `notebook_edit: cannot read ${p}: ${(e as Error).message}`, isError: true }
     }
@@ -137,9 +152,11 @@ export const notebookEdit: ToolDef = {
 }
 
 // Write the notebook back in Jupyter's on-disk format: 1-space indent, trailing
-// newline. Keeps diffs against Jupyter-saved files minimal.
+// newline. Keeps diffs against Jupyter-saved files minimal. Updates readState so
+// future edits know this file's new mtime.
 function writeNotebook(p: string, nb: Notebook): void {
   fs.writeFileSync(p, JSON.stringify(nb, null, 1) + '\n', 'utf8')
+  noteFileState(p)
 }
 
 // Exposed for tests / callers that want the text of a cell's source.

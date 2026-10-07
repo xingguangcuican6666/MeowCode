@@ -1,5 +1,6 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
-import { exec } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import crypto from 'node:crypto'
 import { loadConfig } from '../config'
 import { AgentBridge } from './agent-bridge'
 import { PluginManager } from './plugin-manager'
@@ -19,6 +20,66 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
   const config = options.config || loadConfig()
   const port = options.port || 4040
   const host = options.host || '127.0.0.1'
+
+  // ---- access control ------------------------------------------------------
+  //
+  // This server drives the agent with bypassPermissions, and `/api/tools/call`
+  // reaches ANY tool (bash included). It binds to loopback, but that alone does not
+  // make it private: any page the user has open can POST to http://127.0.0.1:4040,
+  // and a DNS name that resolves to 127.0.0.1 defeats a socket-level check. So:
+  //
+  //   - every /api route requires a per-run secret token (the page is served with
+  //     it embedded, so a user who opens the printed URL never sees a difference);
+  //   - cross-origin requests are refused rather than invited in with `*`;
+  //   - the Host header must name the address we bound to (anti DNS-rebinding).
+  // The port actually bound (listen() may have walked past a busy one).
+  let effectivePort = port
+  const authToken = options.authToken ?? crypto.randomBytes(24).toString('base64url')
+  const requireAuth = options.auth !== false
+
+  const timingSafeEqual = (a: string, b: string): boolean => {
+    const ba = Buffer.from(a)
+    const bb = Buffer.from(b)
+    return ba.length === bb.length && crypto.timingSafeEqual(ba, bb)
+  }
+
+  // Hostname-only comparison: the request already arrived on OUR socket, so the
+  // port adds nothing, while pinning it would break the port-walk fallback below.
+  // What matters is the NAME the client used — that is what DNS rebinding forges.
+  const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+  const boundLoopback = LOOPBACK.has(host.toLowerCase())
+
+  const nameAllowed = (hostname: string): boolean => {
+    const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    if (boundLoopback) return LOOPBACK.has(h) || LOOPBACK.has(`[${h}]`)
+    // A deliberate non-loopback bind answers to that name (and to loopback, since
+    // the user can still reach it locally).
+    return h === host.toLowerCase() || LOOPBACK.has(h)
+  }
+
+  /** Did the client address us by a name we answer to? (anti DNS-rebinding) */
+  const hostAllowed = (hdr: string | undefined): boolean => {
+    if (!hdr) return false
+    // Strip the port; keep IPv6 brackets intact.
+    const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(hdr.trim())
+    return m ? nameAllowed(m[1]) : false
+  }
+
+  /** Is this request's Origin our own page (or absent, i.e. not a browser)? */
+  const originAllowed = (req: IncomingMessage): boolean => {
+    const origin = req.headers.origin
+    if (!origin || origin === 'null') return !origin   // curl/native clients: fine; opaque origin: no
+    try { return nameAllowed(new URL(origin).hostname) } catch { return false }
+  }
+
+  /** The token a request presents, from the header or the query string. */
+  const presentedToken = (req: IncomingMessage, url: URL): string => {
+    const hdr = req.headers['x-meowcode-token']
+    if (typeof hdr === 'string' && hdr) return hdr
+    const auth = req.headers.authorization
+    if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim()
+    return url.searchParams.get('token') ?? ''
+  }
 
   const bridge = new AgentBridge(config, cwd)
   const pluginManager = new PluginManager(cwd)
@@ -91,14 +152,27 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
     res.end(JSON.stringify(data))
   }
 
+  const syncPort = (): void => {
+    const addr = serverRef?.address()
+    if (addr && typeof addr === 'object' && typeof addr.port === 'number') effectivePort = addr.port
+  }
+  let serverRef: http.Server | undefined
+
   const server = http.createServer(async (req, res) => {
-    // CORS headers for local development flexibility
-    res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    // Only our own page is a permitted origin — `*` here let ANY website call
+    // /api/tools/call (preflight passed, response readable) on a server that runs
+    // tools with bypassPermissions.
+    const reqOrigin = req.headers.origin
+    const okOrigin = originAllowed(req)
+    if (reqOrigin && okOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', reqOrigin)
+      res.setHeader('Vary', 'Origin')
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-MeowCode-Token, Authorization')
+    }
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(204)
+      res.writeHead(okOrigin ? 204 : 403)
       res.end()
       return
     }
@@ -106,13 +180,31 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
     const url = new URL(req.url || '/', `http://${host}:${port}`)
     const pathname = url.pathname
 
+    // Anti DNS-rebinding: the browser must have addressed us by the name we bound
+    // to. A page on evil.example whose DNS answers 127.0.0.1 arrives with
+    // Host: evil.example and is refused here.
+    if (!hostAllowed(req.headers.host)) {
+      sendJson(res, 403, { error: 'Host not allowed' })
+      return
+    }
+    if (!okOrigin) {
+      sendJson(res, 403, { error: 'Origin not allowed' })
+      return
+    }
+    // Everything under /api needs the run's token. The page itself is served
+    // without one (it embeds the token for its own later calls).
+    if (requireAuth && pathname.startsWith('/api/') && !timingSafeEqual(presentedToken(req, url), authToken)) {
+      sendJson(res, 401, { error: 'Missing or invalid token. Open the URL printed by MeowCode (it carries ?token=…).' })
+      return
+    }
+
     try {
       // Static Assets
       if ((req.method === 'GET' || req.method === 'HEAD') && (pathname === '/' || pathname === '/index.html')) {
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
         res.writeHead(200)
         if (req.method === 'HEAD') return res.end()
-        const html = generateWebUIHtml(pluginManager.getFrontendScripts())
+        const html = generateWebUIHtml(pluginManager.getFrontendScripts(), requireAuth ? authToken : '')
         res.end(html)
         return
       }
@@ -342,9 +434,10 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
     }
   })
 
-  let effectivePort = port
-
   return {
+    get token() {
+      return requireAuth ? authToken : ''
+    },
     get port() {
       return effectivePort
     },
@@ -378,9 +471,13 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
         server.close(() => resolve())
       })
     },
-    // Internal listen helper
+    // Internal listen helper. `effectivePort` is refreshed from the socket on every
+    // successful bind (startWebUI walks past a busy port by calling server.listen
+    // again, which would otherwise leave the recorded port stale).
     listen(p: number, onListening?: () => void) {
       effectivePort = p
+      serverRef = server
+      server.on('listening', syncPort)
       server.listen(p, host, onListening)
       return server
     },
@@ -388,14 +485,14 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
 }
 
 function launchBrowser(url: string): void {
-  const start =
-    process.platform === 'darwin'
-      ? 'open'
-      : process.platform === 'win32'
-        ? 'start'
-        : 'xdg-open'
+  // No shell: `url` is one argv entry (on win32 `cmd /c start` would re-parse '&').
+  const p = process.platform
+  const cmd = p === 'darwin' ? 'open' : p === 'win32' ? 'rundll32' : 'xdg-open'
+  const args = p === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url]
   try {
-    exec(`${start} ${url}`, () => {})
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true })
+    child.on('error', () => { /* no opener installed — the URL is printed anyway */ })
+    child.unref()
   } catch {
     // Ignore browser open errors
   }
