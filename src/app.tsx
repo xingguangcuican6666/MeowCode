@@ -1919,6 +1919,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
                 questions={userReq.req.questions}
                 width={width}
                 rows={dims.rows}
+                bottomOffset={bottomOffset}
                 onSubmit={(answers) => { const cur = userReq; setUserReq(null); cur?.resolve({ answers }) }}
                 onCancel={() => { const cur = userReq; setUserReq(null); cur?.resolve({ answers: [], cancelled: true }) }}
               />

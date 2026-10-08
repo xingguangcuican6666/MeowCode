@@ -143,3 +143,100 @@ describe('AskUserDialog', () => {
     h.unmount()
   })
 })
+
+// The dialog is bottom-anchored, so the click row comes from the FRAME rather than
+// from a hand-computed offset — this asserts the geometry stays self-consistent
+// (whatever row the label landed on is the row that accepts the click).
+const rowOf = (frame: string[], needle: string): number =>
+  frame.findIndex((r) => r.includes(needle)) + 1
+
+describe('AskUserDialog mouse', () => {
+  it('moves the highlight on press and confirms on release', async () => {
+    let submitted: string[][] | null = null
+    const h = renderToFrames(
+      <ThemeProvider value={colors}>
+        <LangProvider value={lang}>
+          <Box flexDirection="column" width={56} height={24}>
+            <Box flexGrow={1} />
+            <Box flexDirection="column" flexShrink={0}>
+              <AskUserDialog
+                questions={QUESTIONS}
+                width={56}
+                rows={24}
+                bottomOffset={2}
+                onSubmit={(a) => { submitted = a }}
+                onCancel={() => {}}
+              />
+              <Text>footer</Text>
+              <Text>perm</Text>
+            </Box>
+          </Box>
+        </LangProvider>
+      </ThemeProvider>,
+      { cols: 56, rows: 24 },
+    )
+    const frame = await h.frame()
+    // Press on Tone.js's label → highlight moves there, nothing confirmed yet.
+    const toneRow = rowOf(frame, 'Tone.js')
+    expect(toneRow).toBeGreaterThan(0)
+    h.type(`\x1b[<0;10;${toneRow}M`)
+    const pressed = await h.frame()
+    expect(pressed.some((r) => r.includes('❯ Tone.js'))).toBe(true)
+    expect(submitted).toBe(null)
+
+    // Release on the same row → confirms that option.
+    h.type(`\x1b[<0;10;${toneRow}m`)
+    await h.frame()
+    expect(submitted).toEqual([['Tone.js']])
+    h.unmount()
+  })
+
+  it('clicking "Other" opens the free-form field, and a wheel scrolls the preview', async () => {
+    const h = renderToFrames(
+      <ThemeProvider value={colors}>
+        <LangProvider value={lang}>
+          <Box flexDirection="column" width={56} height={24}>
+            <Box flexGrow={1} />
+            <Box flexDirection="column" flexShrink={0}>
+              <AskUserDialog questions={QUESTIONS} width={56} rows={24} bottomOffset={2} onSubmit={() => {}} onCancel={() => {}} />
+              <Text>footer</Text>
+              <Text>perm</Text>
+            </Box>
+          </Box>
+        </LangProvider>
+      </ThemeProvider>,
+      { cols: 56, rows: 24 },
+    )
+    let frame = await h.frame()
+    h.type(`\x1b[<0;10;${rowOf(frame, '其它')}m`)
+    frame = await h.frame()
+    expect(frame.some((r) => r.includes('输入你的答案'))).toBe(true)
+
+    // While typing, the wheel must not scroll the preview (the field owns input).
+    const before = frame.some((r) => r.includes('1-1/3'))
+    h.type('\x1b[<65;10;3M')
+    frame = await h.frame()
+    expect(frame.some((r) => r.includes('1-1/3'))).toBe(before)
+    h.unmount()
+  })
+
+  it('ignores non-left buttons and clicks outside the option list', async () => {
+    let submitted: string[][] | null = null
+    const h = renderToFrames(
+      <ThemeProvider value={colors}>
+        <LangProvider value={lang}>
+          <AskUserDialog questions={QUESTIONS} width={56} rows={24} onSubmit={(a) => { submitted = a }} onCancel={() => {}} />
+        </LangProvider>
+      </ThemeProvider>,
+      { cols: 56, rows: 24 },
+    )
+    const frame = await h.frame()
+    const howler = rowOf(frame, 'Howler.js')
+    h.type(`\x1b[<2;10;${howler}M\x1b[<2;10;${howler}m`) // right button
+    h.type(`\x1b[<0;10;1M\x1b[<0;10;1m`)                  // the dialog's top border row
+    await h.frame()
+    expect(submitted).toBe(null)
+    expect((await h.frame()).some((r) => r.includes('❯ Web Audio API'))).toBe(true)
+    h.unmount()
+  })
+})

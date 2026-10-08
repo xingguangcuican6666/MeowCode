@@ -41,8 +41,14 @@ export function renderToFrames(
   stdin.unref = (): void => {}
   stdin.read = (): string | Buffer | null => (queue.length ? queue.shift()! : null)
   stdin.type = (s: string): void => {
-    queue.push(encoding === 'utf8' ? Buffer.from(s, 'utf8') : s)
+    const buf = encoding === 'utf8' ? Buffer.from(s, 'utf8') : s
+    queue.push(buf)
     stdin.readable = true
+    // 'data' first: components that parse mouse SGR bytes straight off stdin (every
+    // picker in this app) listen for 'data', which a real stream emits alongside
+    // 'readable'. Ink itself only reads via 'readable' + read(), so hand 'data' a
+    // copy and leave the queue intact for Ink to drain.
+    stdin.emit('data', Buffer.from(buf as Buffer))
     stdin.emit('readable')
   }
 
