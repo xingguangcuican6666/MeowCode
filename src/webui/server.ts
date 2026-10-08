@@ -30,10 +30,16 @@ import { CLIENT_SDK_JS } from './client/sdk'
 import { CLIENT_APP_JS } from './client/app'
 import { MATERIAL_WEB_JS } from './client/material-web'
 import { workspaceFilesPlugin } from './plugins/workspace-files'
+import { stableWebUIToken } from './token-store'
 import { toolsInspectorPlugin } from './plugins/tools-inspector'
 import { promptTemplatesPlugin } from './plugins/prompt-templates'
 import { metricsMonitorPlugin } from './plugins/metrics-monitor'
 import type { PluginContext, WebUIOptions, WebUIPlugin, WebUIServerInstance } from './types'
+
+/** The server's own shape plus the one method that is not public: see below. */
+interface WebUIServerInternals extends WebUIServerInstance {
+  listen: (p: number, onListening?: () => void) => http.Server
+}
 
 export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstance {
   const cwd = options.cwd || process.cwd()
@@ -146,15 +152,28 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
   //   - cross-origin requests are refused rather than invited in with `*`;
   //   - the Host header must name the address we bound to (anti DNS-rebinding).
   //
-  // This is the token model from origin/main's security pass. An earlier branch of
-  // this work shipped a two-step variant instead (token in the URL *fragment*,
-  // exchanged for an HttpOnly cookie at POST /api/auth, because EventSource cannot
-  // send headers). That variant was dropped in the merge: this one is a single
-  // step, and src/webui/auth.test.ts asserts its shape. EventSource still
-  // authenticates because /api/events accepts the token as `?token=` — see
-  // presentedToken below.
-  const authToken = options.authToken ?? crypto.randomBytes(24).toString('base64url')
+  // This is the token model from origin/main's security pass: a bearer the page
+  // embeds for its own calls, plus an origin allowlist and a Host check. Two
+  // earlier shapes existed and both left the user with a credential they could not
+  // keep: a fragment the page exchanged at POST /api/auth (EventSource cannot send
+  // headers, so the cookie had to be persistent), and a bare per-process token
+  // (a new URL on every launch). What is here is the union of what survived:
+  //
+  //   - the token is STABLE across restarts (see token-store.ts), so the printed
+  //     URL can be bookmarked and re-opened;
+  //   - it rides the URL as a FRAGMENT, which never reaches a proxy log or a
+  //     Referer header, and the page spends it locally;
+  //   - /api/events keeps accepting `?token=`, which is the one credential an
+  //     EventSource can carry (see presentedToken) — so the header/cookie/query
+  //     triad stays, and auth.test.ts's assertions are unchanged.
+  //
+  // `auth: false` is the deliberate "I want this reachable" opt-in. It must never
+  // mint or store a credential: that would write the user's real token file for a
+  // server that ignores it.
   const requireAuth = options.auth !== false
+  const authToken = requireAuth
+    ? options.authToken ?? stableWebUIToken(() => crypto.randomBytes(24).toString('base64url'))
+    : ''
 
   const timingSafeEqual = (a: string, b: string): boolean => {
     const ba = Buffer.from(a)
@@ -1222,11 +1241,9 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
   let effectivePort = port
 
   // `listen` is server-internal: it lets tests and startWebUI bind the port
-  // themselves. Not part of the public contract.
-  interface WebUIServerInternals extends WebUIServerInstance {
-    listen: (p: number, onListening?: () => void) => http.Server
-  }
-
+  // themselves. Not part of the public contract — but startWebUI routes EVERY
+  // bind through it, including the port-walk retry, because it is the only thing
+  // that records the port that was actually bound.
   const instance: WebUIServerInternals = {
     get port() {
       return effectivePort
@@ -1235,13 +1252,13 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
       return host
     },
     get url() {
-      // Carries the token as a query param, so whatever the caller does with this
-      // URL (print it, open it, hand it to a teammate) works without extra steps.
-      // A query param rather than a fragment: the page reads it at boot and sends
-      // it back on every /api call, which is also the only way EventSource can
-      // authenticate (see presentedToken).
+      // The token rides the FRAGMENT: a fragment is never sent to the server, so
+      // it cannot land in an access log, a proxy log or a Referer header on any
+      // outbound link the page makes. The page reads it at boot and spends it (see
+      // the handshake in client/sdk.ts); /api/events takes `?token=` because
+      // EventSource cannot send headers — see presentedToken.
       const base = `http://${host}:${effectivePort}`
-      return requireAuth ? `${base}/?token=${authToken}` : base
+      return requireAuth ? `${base}/#token=${authToken}` : base
     },
     /**
      * The credential this run's /api routes require — empty when `auth: false`,
@@ -1328,7 +1345,13 @@ export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServe
 
   return new Promise((resolve, reject) => {
     let currentPort = initialPort
-    const server = (instance as any).listen(currentPort)
+    // Every bind goes through the instance's own `listen`, which is what records
+    // the port it landed on. Calling server.listen directly on a retry left
+    // effectivePort naming the port that was ALREADY taken — so instance.url and
+    // the announced link both pointed at a server that does not exist, and that
+    // link is the only credential the user gets.
+    const listen = (instance as WebUIServerInternals).listen
+    const server = listen.call(instance, currentPort)
 
     server.on('error', (err: any) => {
       if (err.code === 'EADDRINUSE') {
@@ -1336,7 +1359,13 @@ export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServe
         if (currentPort > initialPort + 10) {
           reject(new Error(`Unable to bind WebUI server; ports ${initialPort}-${currentPort} are in use.`))
         } else {
-          server.listen(currentPort, host)
+          // Say what happened: the port the user asked for was not the port they
+          // got, and without this the walk-up is invisible — they wonder why the
+          // printed URL is not the one they configured.
+          process.stdout.write(
+            `⚠  Port ${currentPort - 1} is in use, starting WebUI on ${currentPort} instead.\n`,
+          )
+          listen.call(instance, currentPort)
         }
       } else {
         reject(err)
@@ -1344,17 +1373,16 @@ export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServe
     })
 
     server.on('listening', () => {
-      const base = `http://${host}:${currentPort}`
-      // The token is embedded in the served page (see the html() template), and
-      // passed in the query string here so a single link grants access. Both the
-      // header (X-MeowCode-Token / Authorization) and query param (?token=) work.
-      const url = instance.token ? `${base}/?token=${instance.token}` : base
+      // ONE announcement, naming the port instance.url names — both read the same
+      // live value now. (Firing it per bind attempt printed the token twice, the
+      // second time against a stale port.)
+      const base = `http://${host}:${instance.port}`
       if (options.openBrowser !== false) {
-        launchBrowser(url)
+        launchBrowser(instance.url)
       }
       if (instance.token) {
         process.stdout.write(
-          `🔑 WebUI token (this URL is the only credential; treat it like a password): ${base}/?token=${instance.token}\n`,
+          `🔑 WebUI token (this URL is the only credential; treat it like a password): ${base}/#token=${instance.token}\n`,
         )
       } else {
         process.stdout.write(

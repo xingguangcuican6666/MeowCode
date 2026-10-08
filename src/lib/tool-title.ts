@@ -18,13 +18,23 @@ export const TITLE_KEY = 'title'
 // rather than wrapped, since a FlatLine is exactly one row (see lib/transcript).
 const MAX_TITLE = 60
 
-// Strip C0/C1 controls and DEL, then collapse whitespace. A model occasionally
-// emits a newline or an ANSI sequence in a title; both would break the
-// one-row-per-line invariant the scroll viewport depends on, and an escape
-// sequence would repaint the terminal from inside a transcript row.
+/**
+ * Strip C0/C1 controls and DEL, then collapse whitespace. A model occasionally
+ * emits a newline or an ANSI sequence in a title; both would break the
+ * one-row-per-line invariant the scroll viewport depends on, and an escape
+ * sequence would repaint the terminal from inside a transcript row.
+ *
+ * The class is assembled from character CODES rather than written out, so this
+ * file holds no literal control character — which lint rightly flags, which no
+ * editor or diff review can render, and which a copy-paste can silently mangle.
+ */
+const CONTROLS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}-${String.fromCharCode(0x9f)}]`,
+  'g',
+)
+
 function sanitize(raw: string): string {
-  // eslint-disable-next-line no-control-regex
-  const stripped = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+  const stripped = raw.replace(CONTROLS, ' ')
   // An escape sequence also has to lose its CSI payload: dropping ESC alone would
   // leave the "[31m" text behind as visible title characters.
   return stripped.replace(/\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+/g, ' ').trim()
@@ -63,8 +73,11 @@ export function stripToolTitle(name: string, input: Record<string, unknown> | un
   const { [TITLE_KEY]: _display, ...rest } = input
   return rest
 }
+
 /**
- * The meta a tool-call header message carries: the model-set title plus the
+ * The meta a tool-call header message carries: the tool's name and business input
+ * (so the transcript can echo the argument without re-parsing the printed header),
+ * the CALL id, and the model's title when it sent one.
  *
  * Shared so useChat, the launcher and the WebUI bridge all stamp a header the
  * transcript can read back the same way — the fold renderer only ever sees a

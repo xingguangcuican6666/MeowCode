@@ -761,6 +761,12 @@ html, body {
   overflow: hidden;
   background: var(--md-sys-color-surface);
   position: relative;
+  /* A flex item defaults to min-height:auto — "at least as tall as my content".
+     Every box between #app's 100vh column and the transcript needs the explicit
+     permission to give way; miss one link and the column refuses to shrink, so
+     the composer is what gets pushed off the bottom while the sidebar (which
+     does shrink) ends up visibly higher. See the chain in client-css.test.ts. */
+  min-height: 0;
 }
 
 .chat-view {
@@ -770,6 +776,7 @@ html, body {
   overflow: hidden;
   position: relative;
   height: 100%;
+  min-height: 0;
 }
 
 .chat-transcript {
@@ -779,6 +786,8 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  /* The box that absorbs the overflow BY SCROLLING rather than by growing. */
+  min-height: 0;
 }
 
 /* ============================================================================
@@ -1342,6 +1351,10 @@ html, body {
   flex: 1;
   padding: 24px 28px;
   overflow-y: auto;
+  /* Same job as .chat-transcript (below): this is the box that absorbs the
+     overflow by scrolling. Without it a long plugin panel pushes the statusbar
+     off the bottom instead of scrolling inside the shell. */
+  min-height: 0;
 }
 .panel-toolbar {
   display: flex;

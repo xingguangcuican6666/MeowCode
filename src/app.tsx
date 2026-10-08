@@ -771,7 +771,16 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
   // doesn't re-render every message's markdown per keystroke; the live tail
   // changes each frame while streaming.
   const expandAll = getSetting(chat.config.settings, 'verbose') === true
-  const committed = useMemo(() => flattenMessages(chat.messages, width, { banner: true, expanded, expandAll }), [chat.messages, width, expanded, expandAll])
+  // activeTools/turnActive drive the ACTIVE fold block's heading — the present-tense
+  // "Reading X" line plus the argument under it — so they belong in the dependency
+  // list: without them the heading would freeze on whatever it said when the last
+  // message was appended, and a call announced mid-turn would render as history.
+  const committed = useMemo(
+    () => flattenMessages(chat.messages, width, {
+      banner: true, expanded, expandAll, activeTools: chat.activeTools, turnActive: chat.turnActive,
+    }),
+    [chat.messages, width, expanded, expandAll, chat.activeTools, chat.turnActive],
+  )
   const liveThink = useMemo(
     () => (chat.thinking && chat.thinking.content.trim() ? thinkingLines(chat.thinking, width, liveThinkingExpanded || expandAll) : []),
     [chat.thinking, width, liveThinkingExpanded, expandAll],

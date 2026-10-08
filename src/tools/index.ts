@@ -4,10 +4,27 @@ import type { ToolContext, ToolDef, ToolResult } from './types'
 import { TOOLS } from './impl'
 import { subagentTypeNames } from './orchestration'
 import { mcpToolDefs, findMcpTool, isMcpToolName } from '../lib/mcp'
+import { TITLE_KEY, stripToolTitle } from '../lib/tool-title'
 
 export type { ToolContext, ToolDef, ToolResult, SpawnOpts, SpawnResult } from './types'
 export { TOOLS } from './impl'
 export { renderWorkflowReport } from './impl'
+
+// The display-only `title` the model may set on any built-in tool call (see
+// lib/tool-title). It is advertised on a CLONE of each schema — TOOLS holds one
+// schema per definition, shared by every caller, so patching it in place would
+// make the schema depend on who asked last. An MCP tool's `title` is the server's
+// own business, so those are left untouched.
+function withDisplayTitle(name: string, schema: Record<string, unknown>): Record<string, unknown> {
+  if (isMcpToolName(name)) return schema
+  const props = (schema.properties ?? {}) as Record<string, any>
+  if (!props[TITLE_KEY]) {
+    const clone = structuredClone(schema) as Record<string, any>
+    clone.properties = { ...(clone.properties ?? {}), [TITLE_KEY]: { type: 'string', description: 'A short, human-readable title (max 60 chars) stating what you are doing now, for the reader. Display only — never sent to the tool.' } }
+    return clone
+  }
+  return schema
+}
 
 // Patch the dynamic `subagent_type` enum (built-in roles + custom .meowcode/agents)
 // into a cloned schema for the task/workflow tools, so the model sees the custom
@@ -50,7 +67,9 @@ export function toolSchemas(
   const builtin = TOOLS.filter((t) => (includeOrchestration || !t.orchestration) && (allowWorkflow || t.name !== 'workflow') && (planMode || t.name !== 'exit_plan_mode') && permit(t.name)).map((t) => ({
     name: t.name,
     description: t.description,
-    input_schema: cwd ? withDynamicEnums(t.name, t.input_schema, cwd) : t.input_schema,
+    // withDisplayTitle first, then the cwd-driven enum patch: the task/workflow
+    // clone has to be the one carrying the title too, so the two compose.
+    input_schema: withDisplayTitle(t.name, cwd ? withDynamicEnums(t.name, t.input_schema, cwd) : t.input_schema),
   }))
   // Append discovered MCP tools (mcp__<server>__<tool>). Empty until servers
   // finish their handshake, so they surface on the next turn after startup.
@@ -111,7 +130,11 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
   const tool = findTool(name)
   if (!tool) return { content: `unknown tool: ${name}`, isError: true }
   try {
-    return await tool.run(input ?? {}, ctx)
+    // The one execution boundary every caller passes through — the HTTP
+    // /api/tools/call path, the mock provider and the real turn loop — so taking
+    // the display-only `title` off here is what keeps it from reaching a tool, a
+    // permission rule, or the conversation the API replays.
+    return await tool.run(stripToolTitle(name, input ?? {}), ctx)
   } catch (e) {
     if (ctx.signal?.aborted) return { content: '(aborted)', isError: true }
     return { content: `tool ${name} threw: ${(e as Error).message}`, isError: true }

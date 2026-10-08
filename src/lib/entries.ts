@@ -30,6 +30,7 @@ import fs from 'node:fs'
 // inside function bodies, which live bindings make safe.
 import { CONFIG_DIR } from './configDir'
 import { saveConfig } from '../config'
+import { saveApiKey } from './credentials'
 import type { AppConfig } from '../types'
 
 export const ENTRIES_DIR = path.join(CONFIG_DIR, 'entries')
@@ -327,8 +328,14 @@ export function entryAwareSaveConfig(cfg: AppConfig): void {
   }
   try {
     fs.mkdirSync(active.dir, { recursive: true })
+    // Same rule as the global save: no key of any kind reaches a settings file.
+    // The `apiKeySetting` row is not written here at all — an entry is a bundle
+    // of config and content, so a key in it would travel wherever the entry is
+    // copied; saveApiKey is the one place that stores it (credentials.json, 0600).
     const { apiKey: _omit, ...persist } = cfg
-    fs.writeFileSync(path.join(active.dir, 'settings.json'), JSON.stringify(persist, null, 2))
+    const { apiKeySetting, ...rest } = persist.settings ?? {}
+    saveApiKey(String(apiKeySetting ?? ''))
+    fs.writeFileSync(path.join(active.dir, 'settings.json'), JSON.stringify({ ...persist, settings: rest }, null, 2))
   } catch {
     // best-effort; config persistence is non-critical (same stance as saveConfig)
   }

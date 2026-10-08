@@ -106,6 +106,15 @@ export interface MessageMeta {
   toolInput?: Record<string, unknown>
   toolContent?: string
   toolDisplay?: string
+  // The provider's tool_use id for the call this message heads. The MESSAGE id is
+  // a different one, and the transcript matches `activeTools` against THIS one:
+  // pairing by message id made every real call look finished (nothing was ever
+  // announced), while pairing by "a header with no result yet" reported
+  // interrupted calls and restored sessions as work still running.
+  toolCallId?: string
+  // The model's own display title for the call (see lib/tool-title): what it says
+  // it is doing right now. Display only — never a tool argument.
+  toolTitle?: string
 }
 
 export interface Message {

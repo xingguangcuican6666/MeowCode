@@ -10,7 +10,7 @@ import { collectProjectInstructions } from '../lib/projectInstructions'
 import { loadHooks, HOOK_EVENTS } from '../lib/hooks'
 import { listMcpServers } from '../lib/mcp'
 import { loadUserCommands } from '../lib/userCommands'
-import { loadCredentials, clearCredentials } from '../lib/credentials'
+import { loadCredentials, clearCredentials, saveApiKey, keySource } from '../lib/credentials'
 import { logout as newapiLogout } from '../lib/newapi'
 import { revokeOAuth } from '../lib/oauth'
 import { copyToClipboard } from '../lib/clipboard'
@@ -612,8 +612,11 @@ const doctor: SlashCommand = {
     lines.push(t('cmd.doctorCwd', { cwd, git: branch ? `git:${branch}` : t('cmd.doctorNoGit') }))
     lines.push(t('cmd.doctorProvider', { provider: c.provider, model: c.model }))
     const creds = loadCredentials()
-    const how = c.apiKey ? 'apiKey' : creds ? (creds.oauth ? 'oauth' : creds.key ? 'key' : 'session') : t('cmd.doctorNone')
-    lines.push(`${ok(!!(c.apiKey || creds))} ${t('cmd.doctorAuth', { how })}`)
+    // keySource() is the credential the provider would ACTUALLY use, in the order
+    // it resolves them; a readout that disagreed would make /doctor lie about
+    // which key is in force.
+    const how = keySource() ?? (creds ? (creds.oauth ? 'oauth' : creds.key ? 'key' : 'session') : t('cmd.doctorNone'))
+    lines.push(`${ok(!!(c.apiKey || creds || keySource()))} ${t('cmd.doctorAuth', { how })}`)
     lines.push(`${ok(fs.existsSync(CONFIG_FILE))} ${t('cmd.doctorConfig', { path: CONFIG_FILE })}`)
     const channel = (String(getSetting(c.settings, 'autoUpdateChannel')) === 'latest' ? 'latest' : 'stable') as UpdateChannel
     const upd = availableUpdate(channel)
@@ -1111,7 +1114,13 @@ const logout: SlashCommand = {
       if (!r.ok) ctx.print(t('cmd.logoutOauthFailed', { error: r.error ?? t('cmd.logoutUnknownError') }), 'system')
       ctx.print(t('cmd.logoutOauthNote'), 'system')
     }
+    // credentials.json is also the ONLY home of the apiKeySetting key, so
+    // clearCredentials() drops that too — and /logout is about the LOGIN, not
+    // about a key the user typed into /config. Read it out and write it back, or
+    // every /logout silently loses the key they set by hand.
+    const keptKey = cur.apiKey
     clearCredentials()
+    if (keptKey) saveApiKey(keptKey)
     // If the active provider was the logged-in one, fall back so the next turn
     // doesn't hit a now-keyless newapi provider.
     if (ctx.config.provider === 'newapi') {

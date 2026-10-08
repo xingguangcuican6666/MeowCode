@@ -538,15 +538,26 @@ export const CLIENT_SDK_JS = `/**
       ? crypto.randomUUID()
       : 'tab-' + Math.random().toString(36).slice(2) + '-' + String(Date.now())) ;
 
+  // The token may sit in either half of the URL. The fragment is what this build
+  // prints (a server or a proxy log never sees it); the query is what EARLIER
+  // builds printed and what is sitting in everyone's history and bookmarks, so it
+  // still has to be read. Both are spent exactly once and both are scrubbed — a
+  // query-param credential is leaked to every proxy and to Referer headers on
+  // every outbound link the page makes.
   function tokenFromFragment() {
-    const hash = location.hash || '';
-    const m = /[#&]token=([^&]+)/.exec(hash);
-    return m ? decodeURIComponent(m[1]) : '';
+    const raw = /[#&]token=([^&]+)/.exec(location.hash || '')
+      ?? /[?&]token=([^&]+)/.exec(location.search || '')
+    if (!raw) return ''
+    // A hand-edited or half-pasted link can carry a broken escape sequence, and
+    // decodeURIComponent throws URIError on one. Taking the page down over the
+    // credential would be absurd: fall back to the raw text, which the server
+    // rejects on its own, and land in the gate.
+    try { return decodeURIComponent(raw[1]) } catch (_) { return raw[1] }
   }
 
   function scrubFragment() {
-    if (!location.hash) return;
-    history.replaceState(null, '', location.pathname + location.search);
+    if (!location.hash && !location.search) return;
+    history.replaceState(null, '', location.pathname);
   }
 
   async function spendToken(token) {
@@ -574,16 +585,19 @@ export const CLIENT_SDK_JS = `/**
 
   const authReady = (async () => {
     const fragmentToken = tokenFromFragment();
+    // Scrub BEFORE the exchange, not after it: a slow or hanging POST /api/auth
+    // would otherwise leave the credential sitting in the address bar for the
+    // whole round-trip — the one window where a screenshot catches it. The token
+    // is already in a local by now, so nothing downstream needs the URL.
+    scrubFragment();
     // The very first probe rides no credential, so /api/security must be public.
     await probeSecurity();
     if (auth.bypass) {
-      scrubFragment();
       emit('auth:change', { ...auth });
       return auth;
     }
     if (fragmentToken) {
       const ok = await spendToken(fragmentToken).catch(() => false);
-      scrubFragment();
       if (ok) {
         emit('auth:change', { ...auth });
         return auth;

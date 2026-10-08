@@ -8,6 +8,7 @@ import { projectInstructionsPreamble } from '../lib/projectInstructions'
 import { customAgentCatalog } from '../tools/orchestration'
 import { runHooks, hasHooks } from '../lib/hooks'
 import { changeSummary } from '../lib/transcript'
+import { toolHeaderMeta, titleFor } from '../lib/tool-title'
 import { t } from '../lib/i18n'
 import { effortDirective, getSetting, resolveThinkingBudget, outputStyleDirective, workflowSizeDirective } from '../lib/settings'
 import { randomStatusWord, randomCompletedWord } from '../lib/spinner'
@@ -119,6 +120,15 @@ export interface Chat {
   // One entry per running workflow — a turn can fan out several, so the UI shows
   // one collapsed line each (↓ to select, ↵ to expand). Empty when none run.
   workflows: WorkflowSnapshot[]
+  // Tool CALL ids (the provider's tool_use id) announced this turn whose result
+  // has not landed yet. The transcript reads it to decide whether a header is a
+  // call REALLY in flight — see FlattenOpts.activeTools. Empty between turns and
+  // in a restored transcript: nothing there is running, however it looks.
+  activeTools: Set<string>
+  // True while a turn is in flight. Between two sequential calls the open-call set
+  // is legitimately empty but the work plainly is not finished, so the fold block
+  // gets its "in progress" marker from this rather than from an open call.
+  turnActive: boolean
   // Live switchable sub-agents from `task`/`plan` calls this turn — each is a
   // selectable transcript view in the bottom agent switcher (distinct from the
   // workflow tree). Kept until the NEXT turn starts, so a finished sub-agent's
@@ -171,6 +181,15 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
   // arriving snapshot is upserted by id, so several workflows in one turn each
   // keep their own collapsed line; the whole list is cleared when the turn ends.
   const [workflows, setWorkflows] = useState<WorkflowSnapshot[]>([])
+  // The tool calls announced this turn that have not returned, by CALL id.
+  // Replaced (never mutated) so the identity changes exactly when the set does —
+  // that is what lets flattenMessages' useMemo (app.tsx) depend on it: a mutated
+  // Set would keep the same identity and the heading would never re-render.
+  const [activeTools, setActiveTools] = useState<Set<string>>(() => new Set())
+  // True from submit() until the turn's event loop is exhausted. The gap between
+  // two sequential calls has no open call but is plainly unfinished, and the
+  // transcript's "in progress" marker comes from here (see lib/transcript).
+  const [turnActive, setTurnActive] = useState(false)
   // Live switchable sub-agents (`task`/`plan`). Upserted by id as each streams;
   // unlike workflows these survive turn end and are cleared when the NEXT turn
   // begins, so a completed sub-agent's transcript remains browsable.
@@ -384,6 +403,11 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
     const turnStart = Date.now()
     setStatusWord(randomStatusWord())
     setStatus('streaming')
+    // A fresh turn starts with nothing in flight: any id left from the previous
+    // turn belongs to a call whose result already landed (or never will), and
+    // reporting it as running is the lie the transcript test guards against.
+    setActiveTools(new Set())
+    setTurnActive(true)
     // Clear the prior turn's switchable sub-agents as a fresh turn begins (they
     // persist AFTER a turn so they stay browsable, unlike the workflow tree).
     setAgents([])
@@ -607,8 +631,20 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
             outChars += ev.text.length
             if (first) pushLive(); else scheduleLive()
           }
-          else if (ev.type === 'tool_use') { flushThinking(); turnToolCalls++; flushText(); print(`● ${summarizeToolCall(ev.name, ev.input)}`, 'tool') }
+          else if (ev.type === 'tool_use') {
+            flushThinking(); turnToolCalls++; flushText()
+            // Stamp the header with the CALL id and the model's own title (see
+            // lib/tool-title), then announce the id as open. The transcript pairs
+            // activeTools against toolCallId — matching the MESSAGE id instead
+            // made every real call look finished, since nothing was ever
+            // announced under it.
+            setActiveTools((prev) => new Set(prev).add(ev.id))
+            print(`● ${summarizeToolCall(ev.name, ev.input)}`, 'tool', toolHeaderMeta({
+              id: ev.id, name: ev.name, input: ev.input, title: titleFor(ev.name, ev.input),
+            }))
+          }
           else if (ev.type === 'tool_result') {
+            setActiveTools((prev) => { if (!prev.has(ev.id)) return prev; const n = new Set(prev); n.delete(ev.id); return n })
             turnLinesAdded += ev.linesAdded ?? 0
             turnLinesRemoved += ev.linesRemoved ?? 0
             if (ev.diff && ev.diff.length && !ev.isError) {
@@ -711,6 +747,11 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
     // background workflow's tree vanish until its next progress tick.
     setWorkflows((prev) => prev.filter((w) => !w.done))
     setStatus('idle')
+    // The turn is over: nothing is in flight, so every header in it reads as
+    // history. Cleared BEFORE the usage accounting below so a render that lands
+    // mid-teardown cannot show a finished turn as still running.
+    setTurnActive(false)
+    setActiveTools(new Set())
     abortRef.current = null
     // Reflect whether background work outlives this turn — drives the idle
     // "后台运行中" indicator and enables the Esc-cancel path while we drain below.
@@ -743,5 +784,5 @@ export function useChat(initialConfig: AppConfig, initialMessages?: Message[], i
     }
   }, [status, commitMessages, setConfig, print, bumpUsage])
 
-  return { messages, streaming, thinking, live, retry, workflows, agents, bgPending, status, statusWord, config, usage, setConfig, print, foldContext, submit, interrupt, dropWorkflow, dropAgent, rewindTo }
+  return { messages, streaming, thinking, live, retry, workflows, activeTools, turnActive, agents, bgPending, status, statusWord, config, usage, setConfig, print, foldContext, submit, interrupt, dropWorkflow, dropAgent, rewindTo }
 }

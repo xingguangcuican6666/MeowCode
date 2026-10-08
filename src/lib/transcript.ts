@@ -12,8 +12,10 @@ import { renderMarkdown } from './markdown'
 import { symbols } from '../theme'
 import { NAME, VERSION } from '../version'
 import { summarizeToolCall } from '../tools'
-import { displayWidth, wrapToWidth, expandTabs } from './text'
+import { displayWidth, wrapToWidth, expandTabs, truncateToWidth } from './text'
+import { normalizeToolTitle } from './tool-title'
 import { t } from './i18n'
+import type { MessageKey } from './i18n'
 import wrapAnsi from 'wrap-ansi'
 
 // Render markdown, then re-wrap each line to `width` display columns. marked-
@@ -97,6 +99,20 @@ export interface FlattenOpts {
   expanded?: Set<string>
   // Force everything open (the `verbose` setting).
   expandAll?: boolean
+  // Tool CALL ids (`meta.toolCallId`) whose call has been announced but has not
+  // yet returned. The renderer must not INFER "running" from a header whose
+  // result is missing — an interrupted call and a restored session both land
+  // there, and telling the user work is still happening when it is not is a lie
+  // they act on (they wait for work that will never finish). So the answer comes
+  // from the caller's real in-flight state, matched by CALL id: the header
+  // message and the tool_use carry two different ids, and matching the wrong one
+  // makes every real call look finished.
+  activeTools?: Set<string>
+  // The turn is still in flight (the provider's agent loop is not exhausted).
+  // The gap between two sequential calls of one turn — most of a turn's wall
+  // clock — has no open call but is plainly unfinished, and without this the
+  // block flips between present and past tense for work that is still going.
+  turnActive?: boolean
 }
 
 // Resolve one fold's open/closed state from (a) whether the user has clicked it
@@ -145,7 +161,67 @@ type Item =
   | { kind: 'msg'; m: Message }
   | { kind: 'think'; id: string; m: Message }
   | { kind: 'compact'; id: string; m: Message }
-  | { kind: 'tool'; id: string; tool: string; arg: string; header: Message; result?: Message }
+  | {
+    kind: 'tool'
+    id: string
+    tool: string
+    arg: string
+    header: Message
+    result?: Message
+    // The provider's tool_use id for this call, when the header carries it. This
+    // is the id `activeTools` holds — the message id is a different one.
+    callId?: string
+  }
+
+// Is this tool call still running? Only the caller knows (see FlattenOpts
+// .activeTools), and a missing result is NOT evidence: an interrupted call and a
+// restored session both look identical here.
+const isActive = (it: Extract<Item, { kind: 'tool' }>, active?: Set<string>): boolean =>
+  !!it.callId && !!active?.has(it.callId)
+
+// The PRESENT-tense heading for a call that is really running: the model's own
+// title when it sent one (see lib/tool-title), else our verb for the tool. The
+// word after the title is the one argument worth echoing, so the header states
+// the activity and the row under it names the file/command.
+//
+// Every verb goes through i18n rather than sitting in a table here: the TUI is
+// bilingual, and a hardcoded English map meant the Chinese build showed "Running"
+// mid-turn — which is the English past-tense summary's first word plus a
+// different meaning, so it read as history for work still in flight.
+const ACTIVE_VERB: Record<string, MessageKey> = {
+  read_file: 'run.activeRead',
+  write_file: 'run.activeWrite',
+  edit_file: 'run.activeEdit',
+  notebook_edit: 'run.activeNotebook',
+  list_dir: 'run.activeList',
+  grep: 'run.activeSearch',
+  web_search: 'run.activeSearch',
+  glob: 'run.activeGlob',
+  bash: 'run.activeRun',
+  bash_output: 'run.activeReadOutput',
+  web_fetch: 'run.activeFetch',
+}
+
+const activeHeading = (it: Extract<Item, { kind: 'tool' }>, width: number): string => {
+  const modelTitle = normalizeToolTitle(it.header.meta?.toolTitle)
+  const key = ACTIVE_VERB[it.tool]
+  const text = modelTitle || (key ? t(key) : t('run.activeCall', { name: it.tool }))
+  // A FlatLine is exactly ONE terminal row (see the file header), and the model
+  // is not obliged to respect our width — a title with an embedded newline would
+  // desynchronize the viewport's `lines[i] ↔ row i` mapping, so this is a hard
+  // cut with an ellipsis, never a wrap.
+  return `  ${symbols.assistant} ${truncateToWidth(text, Math.max(8, width - 4))}`
+}
+
+// The one row under an active heading: the argument the call acts on. Skipped
+// when there is nothing to echo, so a tool with no visible argument is ONE row.
+const activeArgRow = (it: Extract<Item, { kind: 'tool' }>): string | null => {
+  const arg = String(it.header.meta?.toolInput?.path ?? it.header.meta?.toolInput?.command
+    ?? it.header.meta?.toolInput?.pattern ?? it.header.meta?.toolInput?.url ?? it.arg ?? '')
+    .split('\n')[0]
+    .trim()
+  return arg ? `  ⎿  ${arg}` : null
+}
 
 // Turn a list of messages into one flat, row-per-entry array. `width` is the
 // full terminal width; prose is reflowed to width-4 (matching Message.tsx) and
@@ -158,6 +234,8 @@ export function flattenMessages(messages: Message[], width: number, opts?: Flatt
   const contentW = Math.max(20, width - 4)
   const expanded = opts?.expanded
   const expandAll = opts?.expandAll === true
+  const activeTools = opts?.activeTools
+  const turnActive = opts?.turnActive === true
   const push = (text: string, kind: LineKind, group?: string): void => { out.push({ text, kind, group }) }
   const spacer = (): void => { if (out.length && out[out.length - 1].kind !== 'blank') push('', 'blank') }
 
@@ -172,7 +250,15 @@ export function flattenMessages(messages: Message[], width: number, opts?: Flatt
       const next = messages[k + 1]
       let result: Message | undefined
       if (next && next.role === 'tool' && next.content.startsWith('⎿')) { result = next; k++ }
-      items.push({ kind: 'tool', id: m.id, tool: toolNameFromHeader(m.content), arg: argFromHeader(m.content), header: m, result })
+      items.push({
+        kind: 'tool',
+        id: m.id,
+        tool: toolNameFromHeader(m.content),
+        arg: argFromHeader(m.content),
+        header: m,
+        result,
+        ...(m.meta?.toolCallId ? { callId: m.meta.toolCallId } : {}),
+      })
       continue
     }
     if (!m.content.trim() && m.role !== 'tool') continue
@@ -214,10 +300,23 @@ export function flattenMessages(messages: Message[], width: number, opts?: Flatt
       const run = items.slice(k, j + 1)
       k = j
       const gid = (run[0] as { id: string }).id
+      // The LAST call announced in this run is the one in flight: an earlier
+      // header's result has already landed (that is what closed it), so naming
+      // the first would say the block is doing something it finished.
+      const live = [...run].reverse().find((r): r is Extract<Item, { kind: 'tool' }> => r.kind === 'tool' && isActive(r, activeTools))
       // A merged activity run defaults to collapsed; `verbose` opens them all.
       const open = foldState(expanded?.has(gid) ?? false, false, expandAll)
       const s = out.length
-      if (open) {
+      if (live) {
+        // A call REALLY running reads in the present tense: heading + argument,
+        // and the SAME two rows whether the block is folded or open — the row
+        // count must not depend on the fold state (app.tsx's windowing math
+        // assumes `lines[i] ↔ row i`), so an expanded run still leads with the
+        // live heading rather than the past-tense per-call header.
+        out.push({ text: activeHeading(live, contentW), kind: 'tool-header', group: gid })
+        const arg = activeArgRow(live)
+        if (arg) out.push({ text: arg, kind: 'tool', group: gid })
+      } else if (open) {
         // One continuous, UNIFORMLY-tinted band behind the whole expanded run
         // (see FlatLine.tint / app.tsx). think vs tool are told apart by FONT
         // depth, not by different background shades. A single TINTED blank row
@@ -228,8 +327,14 @@ export function flattenMessages(messages: Message[], width: number, opts?: Flatt
           if (ri > 0) out.push({ text: '', kind: 'blank', group: gid, tint: true })
           emitMergedFull(r, out, contentW, gid)
         })
+      } else {
+        const glyph = run[0].kind === 'think' ? symbols.star : symbols.assistant
+        // Nothing is open right now, but the turn has not ended: the model is
+        // between moves. Say so rather than letting the block read as finished
+        // history — there is no call to name, so no heading is invented.
+        const marker = !live && turnActive ? t('run.inProgress') : ''
+        push(`  ${glyph} ${mergedSummary(run)}${marker ? ` (${marker})` : ''}`, 'collapsed', gid)
       }
-      else { const glyph = run[0].kind === 'think' ? symbols.star : symbols.assistant; push(`  ${glyph} ${mergedSummary(run)}`, 'collapsed', gid) }
       markStart(s)
       spacer()
       continue
@@ -431,6 +536,28 @@ export function thinkingLines(msg: Message, width: number, expanded = false): Fl
   const out: FlatLine[] = [head]
   for (const l of plainLines(msg.content, contentW)) out.push({ text: `  ${l}`, kind: 'thinking' })
   return out
+}
+
+/**
+ * The tool calls an agent has announced but not returned, as a set of CALL ids.
+ *
+ * This is the only honest source for "what is running" (FlattenOpts.activeTools):
+ * pairing by hand across a message list is what let an interrupted call or a
+ * restored session read as work in flight. `stillRunning` is the agent's own
+ * terminal state — an agent that errored mid-call did not leave work running, so
+ * its unmatched ids are NOT open.
+ *
+ * A workflow provider can announce a batch of calls before returning any results,
+ * so several open ids at once is normal, not malformed.
+ */
+export function openToolCalls(events: AgentEvent[], stillRunning: boolean): Set<string> {
+  const open = new Set<string>()
+  if (!stillRunning) return open
+  for (const ev of events) {
+    if (ev.type === 'tool_use') open.add(ev.id)
+    else if (ev.type === 'tool_result') open.delete(ev.id)
+  }
+  return open
 }
 
 // Rebuild a sub-agent's transcript (Message[]) from its raw event stream, so the

@@ -745,6 +745,26 @@ export const messages = {
   'run.write': { zh: '写入', en: 'Write' },
   'run.noChanges': { zh: '无改动', en: 'No changes' },
   'run.changeSummary': { zh: '新增 {added} 行，删除 {removed} 行', en: 'Added {added} line{al}, removed {removed} line{rl}' },
+  // Appended to a collapsed run's summary when no call is open but the turn has
+  // not ended: the model is between moves, which is most of a turn's wall clock.
+  'run.inProgress': { zh: '进行中', en: 'in progress' },
+
+  // The PRESENT-tense heading for a call that is really running, used only when
+  // the model sent no title of its own (see lib/transcript activeHeading). One key
+  // per tool rather than a 'Running {tool}' template: Chinese leads with 正在 and
+  // English with the bare verb, so a single template cannot hold both.
+  'run.activeRead': { zh: '正在读取', en: 'Reading' },
+  'run.activeReadOutput': { zh: '正在读取输出', en: 'Reading output of' },
+  'run.activeWrite': { zh: '正在写入', en: 'Writing' },
+  'run.activeEdit': { zh: '正在编辑', en: 'Editing' },
+  'run.activeNotebook': { zh: '正在编辑笔记本', en: 'Editing notebook' },
+  'run.activeList': { zh: '正在列出目录', en: 'Listing' },
+  'run.activeSearch': { zh: '正在搜索', en: 'Searching' },
+  'run.activeGlob': { zh: '正在匹配', en: 'Globbing' },
+  'run.activeRun': { zh: '正在运行', en: 'Running' },
+  'run.activeFetch': { zh: '正在获取', en: 'Fetching' },
+  // The last resort, for a tool with no verb of its own (an MCP tool, say).
+  'run.activeCall': { zh: '正在执行 {name}', en: 'Running {name}' },
 
   // LegacyDirDialog (src/components/LegacyDirDialog.tsx) — the one-time
   // ~/.anycode → ~/.meowcode config-dir migration asked at startup. The dialog

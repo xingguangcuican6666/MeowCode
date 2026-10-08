@@ -302,6 +302,14 @@ server and answered from the browser over `/api/interaction`.
 - **Session ids are validated before they become filenames** (`isValidSessionId`):
   they arrive from `--resume` and the WebUI's load/rename/delete bodies, and
   `../../../x` would otherwise reach a `.json` outside `sessions/`.
+- **The `apiKeySetting` row lives in `credentials.json` (0600), never in
+  `settings.json`.** The settings file is a 0666 preferences file — any account on the
+  machine can read it — and an entry's own settings.json is no better. `loadConfig`
+  resolves the row LAST (after entry layering) and always through `loadApiKey()`, so a
+  key hand-edited into any settings file is ignored rather than honoured: a bag showing
+  a key the provider never sends is worse than no key at all. `/logout` must preserve the
+  hand-typed key around `clearCredentials()` (`commands/index.ts`). `credentials.ts`
+  imports no config module — `config → entries → credentials` is an ESM cycle.
 - Mid-turn auto-compaction and context-overflow retry are implemented in
   `providers/anthropic.ts` (`compactConvo`, `pickCut`, `MAX_STEPS = 1000`) — do not
   assume Claude's exact thresholds there.
@@ -333,6 +341,31 @@ server and answered from the browser over `/api/interaction`.
   the URL *fragment*, exchanged for an HttpOnly cookie (cookies are what let
   `EventSource` authenticate, since it cannot send headers), plus an origin allowlist that
   stays on even under `--no-auth`. `Access-Control-Allow-Origin: *` must never come back.
+- **The WebUI token is stable across restarts** (`webui/token-store.ts`, 0600 in
+  `~/.meowcode/webui-token`), so the printed URL can be bookmarked and re-opened — an
+  earlier per-process token made 「关掉网页再打开就又要 token」 look like the token
+  rotating under the user. `auth: false` must mint and store *nothing*. `startWebUI`
+  routes every bind, including the port-walk retry, through the instance's own
+  `listen()`: it is the only thing that records the port actually bound, and the
+  announced URL is the only credential the user gets.
+- **The WebUI's auth handshake scrubs the bar BEFORE the exchange** (`client/sdk.ts`),
+  not after — a slow `POST /api/auth` would otherwise leave the credential visible for
+  the whole round-trip. It reads the token from the fragment *and* the query string:
+  earlier builds printed `?token=`, and those links are in everyone's history. A
+  malformed percent-escape must fall back to the raw text, not throw.
+- **A flex chain that ends in a scroller needs `min-height: 0` at every link**, and
+  `webui/client-css.test.ts` asserts it as text. A flex item defaults to
+  `min-height: auto` ("at least as tall as my content"), so `#app > .main-workspace >
+  .content-area > .chat-view > .chat-transcript` is all rigid unless told otherwise —
+  the transcript then refuses to shrink, the composer is pushed off the bottom, and the
+  sidebar (which *does* shrink) ends up visibly higher. That is 「输入框直接嵌进去了，比
+  侧边栏底还低」, and it looks like a z-index bug until you check the shrink chain.
+- **"Still running" is not inferred from a missing tool result.** `FlattenOpts` carries
+  `activeTools` (tool **call** ids, from `meta.toolCallId` — *not* message ids) and
+  `turnActive`; a header with no result is an interrupted call or a restored session
+  until proven otherwise, and calling that "still going" is a lie the user acts on. The
+  present-tense verbs live in `lib/i18n.ts` (`run.active*`), not in a table in
+  `lib/transcript.ts` — Chinese leads with 正在, so no single template holds both.
 - **The WebUI client is HTML-injection-sensitive in two shapes, and there is a test for
   each.** `webui/client/*.ts` and `webui/plugins/*.ts` are served as raw template-literal
   strings, so a sink is (a) a `${…}` interpolated *inside a `<tag …>`* — caught by
