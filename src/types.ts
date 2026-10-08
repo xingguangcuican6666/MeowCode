@@ -227,7 +227,11 @@ export interface UserQuestion {
   question: string
   header: string
   multiSelect?: boolean
-  options: Array<{ label: string; description?: string }>
+  options: Array<{ label: string; description?: string; preview?: string }>
+  // Optional plain-text / ASCII panel for the QUESTION: a tree, a layout sketch, a
+  // diff — whatever makes the choice concrete instead of abstract. Rendered above
+  // the option list. Per-option previews win over this one.
+  preview?: string
 }
 
 // A pending `ask_user` prompt handed to the UI (one or more questions), and the

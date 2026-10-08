@@ -80,3 +80,41 @@ describe('toolSchemas', () => {
     expect(sub).not.toContain('workflow')
   })
 })
+
+describe('ask_user', () => {
+  it('accepts a preview on the question and on an individual option', async () => {
+    const { askUser } = await import('./ask')
+    let seen: any
+    const r = await askUser.run(
+      {
+        questions: [{
+          question: 'Which audio stack?',
+          header: 'Audio',
+          preview: 'A. native\nB. wrapper',
+          options: [
+            { label: 'Web Audio API', description: 'no deps', preview: 'new AudioContext()' },
+            { label: 'Howler.js' },
+            { label: 'Tone.js' },
+          ],
+        }],
+      },
+      { requestUserInput: async (req: { questions: unknown[] }) => { seen = req; return { answers: [['Howler.js']] } } } as never,
+    )
+    expect(r.isError).toBeFalsy()
+    const q = seen.questions[0] as { preview?: string; options: Array<{ preview?: string }> }
+    expect(q.preview).toBe('A. native\nB. wrapper')
+    expect(q.options[0].preview).toBe('new AudioContext()')
+    expect(q.options[1].preview).toBeUndefined()
+    // The schema advertises both levels so the model actually uses them.
+    const props = (askUser.input_schema as any).properties.questions.items.properties
+    expect(Object.keys(props)).toContain('preview')
+    expect(Object.keys(props.options.items.properties)).toContain('preview')
+  })
+
+  it('reports the missing interactive user instead of hanging', async () => {
+    const { askUser } = await import('./ask')
+    const r = await askUser.run({ questions: [{ question: 'q?', header: 'h', options: [{ label: 'a' }, { label: 'b' }] }] }, {} as never)
+    expect(r.isError).toBe(true)
+    expect(r.content).toContain('No interactive user')
+  })
+})

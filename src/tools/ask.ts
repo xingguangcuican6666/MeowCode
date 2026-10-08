@@ -18,9 +18,23 @@ function normalizeQuestions(raw: unknown): UserQuestion[] {
     const header = String((q as any).header ?? '').trim() || question.slice(0, 12)
     const optsRaw = Array.isArray((q as any).options) ? (q as any).options : []
     const options = optsRaw
-      .map((o: any) => (o && typeof o === 'object' ? { label: String(o.label ?? '').trim(), description: o.description ? String(o.description) : undefined } : { label: String(o ?? '').trim() }))
+      .map((o: any) => (o && typeof o === 'object'
+        ? {
+            label: String(o.label ?? '').trim(),
+            description: o.description ? String(o.description) : undefined,
+            preview: o.preview ? String(o.preview) : undefined,
+          }
+        : { label: String(o ?? '').trim() }))
       .filter((o: { label: string }) => o.label)
-    out.push({ question, header, multiSelect: (q as any).multiSelect === true, options })
+    // Cap each preview so a runaway diagram can't take over the screen; the
+    // dialog window-scrolls anything longer.
+    out.push({
+      question,
+      header,
+      multiSelect: (q as any).multiSelect === true,
+      options,
+      preview: (q as any).preview ? String((q as any).preview).slice(0, 4000) : undefined,
+    })
   }
   return out
 }
@@ -28,7 +42,7 @@ function normalizeQuestions(raw: unknown): UserQuestion[] {
 export const askUser: ToolDef = {
   name: 'ask_user',
   description:
-    'Ask the user one or more structured multiple-choice questions when you hit a decision that is genuinely theirs to make — a fork you cannot resolve from the request, the code, or sensible defaults. Each question offers 2-4 concrete options; the user can always pick "Other" and type a custom answer, so you never add an Other option yourself. Use sparingly: for small choices with an obvious default, just proceed and say what you chose. Returns the user\'s selections as text. In a sub-agent or headless run there is no interactive user, so the tool reports that instead — proceed on your best judgment.',
+    'Ask the user one or more structured multiple-choice questions when you hit a decision that is genuinely theirs to make — a fork you cannot resolve from the request, the code, or sensible defaults. Each question offers 2-4 concrete options; the user can always pick "Other" and type a custom answer, so you never add an Other option yourself. Attach a `preview` (plain text / ASCII art) to a question or to an individual option whenever the choice is about shape — a layout, a tree, a config — that the labels alone cannot convey. Use sparingly: for small choices with an obvious default, just proceed and say what you chose. Returns the user\'s selections as text. In a sub-agent or headless run there is no interactive user, so the tool reports that instead — proceed on your best judgment.',
   input_schema: {
     type: 'object',
     properties: {
@@ -43,6 +57,10 @@ export const askUser: ToolDef = {
             question: { type: 'string', description: 'The full question text, ending with a question mark.' },
             header: { type: 'string', description: 'A very short label/chip for the question (≤12 chars).' },
             multiSelect: { type: 'boolean', description: 'Allow the user to select multiple options (default false).' },
+            preview: {
+              type: 'string',
+              description: 'Optional plain-text panel shown ABOVE the options while the user reads the question — an ASCII layout, a directory tree, a stub of the code you are choosing between. Use it when the choice is about SHAPE and the labels alone cannot convey it. Keep it under ~40 lines.',
+            },
             options: {
               type: 'array',
               description: '2-4 distinct options to choose from.',
@@ -53,6 +71,10 @@ export const askUser: ToolDef = {
                 properties: {
                   label: { type: 'string', description: 'The option text shown and returned.' },
                   description: { type: 'string', description: 'Optional one-line explanation of what this option means.' },
+                  preview: {
+                    type: 'string',
+                    description: 'Optional plain-text panel shown for THIS option (wins over the question-level preview) — an ASCII sketch, sample output, a signature, a config snippet.',
+                  },
                 },
                 required: ['label'],
               },

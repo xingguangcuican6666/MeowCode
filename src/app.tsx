@@ -1797,7 +1797,17 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
             workflows + footer, pinned to the terminal's last rows. Hidden while a
             modal overlay owns the screen; the transcript scrolls behind it. */}
         {!modalOpen ? (
-          <Box flexDirection="column">
+          // flexShrink={0} is load-bearing: the cluster's height CHANGES with the
+          // input box (3 rows for one line, more for a wrapped/multi-line prompt,
+          // and a dialog's worth when a permission / ask_user prompt replaces it).
+          // `clusterH` above can only estimate it, so when the cluster needs more
+          // rows than estimated, the extra must come out of the flexGrow VIEWPORT —
+          // which already windows its own content and has overflow:hidden. Without
+          // this, Ink shrinks the cluster itself: the input box's rows get squashed
+          // onto each other ("输第二行就和第一行重叠") and its bottom border lands on
+          // the footer row. Terminal-independent; it just reads worse where the
+          // auto-wrap makes the overlap obvious.
+          <Box flexDirection="column" flexShrink={0}>
             {scrolled ? (
               <Box justifyContent="center">
                 <Text backgroundColor={colors.blockBg || undefined} color={colors.accentBright} bold wrap="truncate">
@@ -1908,6 +1918,7 @@ export function App({ config, initial, onClear, onSnapshot, onResume, onFork, re
               <AskUserDialog
                 questions={userReq.req.questions}
                 width={width}
+                rows={dims.rows}
                 onSubmit={(answers) => { const cur = userReq; setUserReq(null); cur?.resolve({ answers }) }}
                 onCancel={() => { const cur = userReq; setUserReq(null); cur?.resolve({ answers: [], cancelled: true }) }}
               />
