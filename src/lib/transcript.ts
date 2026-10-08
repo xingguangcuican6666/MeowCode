@@ -86,12 +86,28 @@ export interface FlatLine {
 
 export interface FlattenOpts {
   banner?: boolean
-  // Ids the user has toggled from their default state. For merged activity runs
-  // presence = expanded (default collapsed); for diff views presence = collapsed
-  // (default open). See app.tsx's click handler.
+  // Ids the user has CLICKED — i.e. folded away from whatever their default was.
+  // This is deliberately NOT "the set of expanded ids": the two kinds of fold
+  // default in opposite directions (a merged activity run starts collapsed, a
+  // write/edit diff starts open), and under the `verbose` setting they both
+  // start open. Reading membership as "expanded" therefore froze diffs open for
+  // good, and froze every fold open under verbose — clicks could only ever
+  // expand. `foldState` below resolves the polarity from the default, so one
+  // membership set drives all three cases.
   expanded?: Set<string>
   // Force everything open (the `verbose` setting).
   expandAll?: boolean
+}
+
+// Resolve one fold's open/closed state from (a) whether the user has clicked it
+// and (b) the state it has when untouched. `expandAll` (the `verbose` setting)
+// IS part of that default state — it opens every fold — so a click inverts the
+// EFFECTIVE default. That is what makes a click work under verbose at all: when
+// the default counted verbose separately, an expanded merge read as "clicked"
+// and came back open.
+function foldState(toggled: boolean, defaultOpen: boolean, expandAll: boolean): boolean {
+  const untouched = defaultOpen || expandAll
+  return toggled ? !untouched : untouched
 }
 
 // Tools whose activity is terse enough to collapse and merge into one summary
@@ -177,7 +193,8 @@ export function flattenMessages(messages: Message[], width: number, opts?: Flatt
       // the same group/expanded toggle as merged activity runs. Never dumps the
       // whole summary into the transcript (issue: "而不是全文展示给用户").
       const gid = it.id
-      const open = expandAll || (expanded?.has(gid) ?? false)
+      // A compaction digest also defaults to collapsed.
+      const open = foldState(expanded?.has(gid) ?? false, false, expandAll)
       const s = out.length
       const head = `  ${COMPACT_GLYPH} ${t('compact.collapsed', { n: it.m.meta?.foldedCount ?? 0 })}`
       if (open) {
@@ -197,7 +214,8 @@ export function flattenMessages(messages: Message[], width: number, opts?: Flatt
       const run = items.slice(k, j + 1)
       k = j
       const gid = (run[0] as { id: string }).id
-      const open = expandAll || (expanded?.has(gid) ?? false)
+      // A merged activity run defaults to collapsed; `verbose` opens them all.
+      const open = foldState(expanded?.has(gid) ?? false, false, expandAll)
       const s = out.length
       if (open) {
         // One continuous, UNIFORMLY-tinted band behind the whole expanded run
@@ -352,8 +370,11 @@ function emitTool(it: Extract<Item, { kind: 'tool' }>, out: FlatLine[], contentW
   const diff = it.result.meta?.diff
   if (diff && diff.length && !err) {
     // Summary line (clickable to toggle) then the diff rows (open by default).
+    // A diff defaults to OPEN — the polarity opposite a merged run's, which is
+    // exactly why this goes through foldState instead of reading the set
+    // directly.
     it.result.content.split('\n').forEach((l) => out.push({ text: `  ${l}`, kind: 'tool', group: gid }))
-    const open = expandAll || !(expanded?.has(gid) ?? false)
+    const open = foldState(expanded?.has(gid) ?? false, true, expandAll)
     if (open) for (const dl of diffFlat(diff)) out.push({ ...dl, group: gid })
     return
   }

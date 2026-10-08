@@ -5,6 +5,7 @@ import { loadConfig } from '../config'
 import {
   SETTINGS,
   coerceSetting,
+  formatSettingValue,
   getSetting,
   settingGroups,
   type SettingValue,
@@ -1046,7 +1047,15 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
             surfaces: spec.surfaces ?? ['tui', 'web'],
             label: settingLabel(lang, spec.key, spec.label),
             description: settingDesc(lang, spec.key, spec.description),
-            value: getSetting(bag, spec.key),
+            // A credential leaves the browser with NO value: /api/settings is reachable
+            // by anything holding the token, and a settings dump has no business
+            // carrying a key. Every other row keeps the live value — the editor
+            // feeds `value` straight back — and a secret row renders as a password
+            // field carrying only the marker below ("set (13 chars)" / "unset"), so
+            // the client never has the key at all.
+            value: spec.secret ? '' : getSetting(bag, spec.key),
+            display: spec.secret ? formatSettingValue(spec, getSetting(bag, spec.key)) : undefined,
+            secret: spec.secret === true,
           })),
         })
         return

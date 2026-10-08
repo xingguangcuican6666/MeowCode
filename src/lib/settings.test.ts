@@ -31,6 +31,18 @@ describe('SETTINGS table', () => {
     }
   })
 
+  it('the api endpoint and key are both settable, and the key is marked secret', () => {
+    // The user asked for these by name: /config apiBaseUrl <url> and
+    // /config apiKeySetting <key> must reach the provider, and the key must never
+    // be echoed back into a transcript.
+    const base = SETTINGS_BY_KEY['apiBaseUrl']
+    expect(base?.type).toBe('string')
+    expect(base?.default).toBe('')
+    const key = SETTINGS_BY_KEY['apiKeySetting']
+    expect(key?.type).toBe('string')
+    expect(key?.secret).toBe(true)
+  })
+
   it('every number setting respects its bounds by default', () => {
     for (const s of SETTINGS) {
       if (s.type === 'number') {
@@ -88,6 +100,13 @@ describe('formatSettingValue', () => {
 
   it('renders numbers with their unit', () => {
     expect(formatSettingValue(numSpec, 30)).toBe('30s')
+  })
+
+  it('never echoes a secret setting back, only whether one is set', () => {
+    const spec: SettingSpec = { key: 'k', label: 'K', group: 'g', type: 'string', default: '', secret: true, description: '' }
+    expect(formatSettingValue(spec, '')).toBe('unset')
+    expect(formatSettingValue(spec, 'sk-ant-secret')).toBe('set (13 chars)')
+    expect(formatSettingValue(spec, 'sk-ant-secret')).not.toContain('secret')
   })
 })
 

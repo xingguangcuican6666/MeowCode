@@ -12,7 +12,7 @@ import { rankMatches } from '../lib/search'
 import { settingLabel, settingDesc, bothLangs, type Lang, type MessageKey } from '../lib/i18n'
 import { useT, useLang } from '../hooks/useT'
 import {
-  SETTINGS, type SettingSpec, getSetting, coerceSetting, settingHint,
+  SETTINGS, type SettingSpec, formatSettingValue, getSetting, coerceSetting, settingHint,
 } from '../lib/settings'
 import { contextState, contextLevel, fmtTokens, fmtDuration, bar } from '../lib/usage'
 import { fmtUsd } from '../lib/pricing'
@@ -139,6 +139,9 @@ function rowValue(row: Row, config: AppConfig, t: Tr): string {
   const spec = row.spec
   const v = getSetting(config.settings, spec.key)
   if (spec.type === 'boolean') return v ? 'true' : 'false'
+  // A credential shows only whether one is set — same marker /config prints, so
+  // the panel can't be screenshotted into leaking it.
+  if (spec.secret) return formatSettingValue(spec, v)
   const base = spec.type === 'number' ? `${v}${spec.unit ?? ''}` : String(v)
   // Mark the default like Claude Code ("medium (default)") — but not for booleans.
   return v === spec.default ? t('val.withDefault', { base }) : base
@@ -166,6 +169,15 @@ function editSeed(row: Row, config: AppConfig): string {
   if (row.kind === 'core') return row.key === 'system' ? (config.system ?? '') : String(config[row.key] ?? '')
   if (row.kind === 'setting') return String(getSetting(config.settings, row.spec.key))
   return ''
+}
+
+// The draft an inline edit starts from. A secret row starts EMPTY, not seeded with
+// the stored key: the value is the one thing the panel must not render, and an
+// empty field that the user fills is how they replace it. (Enter on an empty
+// secret field clears it — see the commit path — which is the "unset" gesture.)
+function editDraft(row: Row, config: AppConfig): string {
+  if (row.kind === 'setting' && row.spec.secret) return ''
+  return editSeed(row, config)
 }
 
 // Read-only tab bodies. Each returns markdown-free lines the panel renders as a
@@ -280,7 +292,7 @@ export function SettingsPanel(props: Props): React.ReactElement {
   // Toggle/cycle a row in place, or drop into inline edit for text/number rows.
   const activate = (row: Row): void => {
     if (row.kind === 'readonly') return
-    if (isTextRow(row)) { setDraft(editSeed(row, config)); setEditError(null); setEditing(true); return }
+    if (isTextRow(row)) { setDraft(editDraft(row, config)); setEditError(null); setEditing(true); return }
     if (row.kind === 'setting' && row.spec.type === 'boolean') {
       setConfig({ settings: { ...config.settings, [row.spec.key]: !getSetting(config.settings, row.spec.key) } })
       return

@@ -8,6 +8,7 @@ import { contextLimit, maxOutputTokens, AUTO_COMPACT_RATIO } from '../lib/usage'
 import { parseRetryCodes, sleep, backoffMs, parseRetryAfter } from './retry'
 import { type ApiBlock, type ApiMsg, toApiMessages, parseStream } from './wire'
 import { t } from '../lib/i18n'
+import { getSetting } from '../lib/settings'
 
 const API_VERSION = '2023-06-01'
 // Last-resort guard against a runaway loop (e.g. a misbehaving provider that keeps
@@ -105,7 +106,23 @@ function toMessagesUrl(base: string): string {
 }
 
 function resolveUrl(opts: AnthropicOpts): string {
-  return toMessagesUrl(opts.resolveBaseUrl?.() || opts.baseUrl || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com')
+  return toMessagesUrl(opts.resolveBaseUrl?.() || opts.baseUrl || configuredBaseUrl() || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com')
+}
+
+// The `apiBaseUrl` / `apiKeySetting` settings (see lib/settings.ts) override the
+// endpoint and the credential for every Anthropic-protocol provider. Both are read
+// live off disk so `/config apiBaseUrl <url>` takes effect on the next request
+// without a restart — the same reason the logged-in provider re-reads credentials.json
+// per call. Settings win over env so a config change is predictable; env stays
+// the fallback, and an empty setting means "not set" (never an empty URL).
+export function configuredBaseUrl(): string | undefined {
+  const v = String(getSetting(loadConfig().settings, 'apiBaseUrl') ?? '').trim()
+  return v || undefined
+}
+
+export function configuredKey(): string | undefined {
+  const v = String(getSetting(loadConfig().settings, 'apiKeySetting') ?? '').trim()
+  return v || undefined
 }
 
 // Custom providers read their key from a named env var (never persisted); a
@@ -114,7 +131,9 @@ function resolveUrl(opts: AnthropicOpts): string {
 function resolveKey(opts: AnthropicOpts): string | undefined {
   if (opts.resolveKey) return opts.resolveKey()
   if (opts.apiKeyEnv) return process.env[opts.apiKeyEnv]
-  return loadConfig().apiKey || process.env.ANTHROPIC_API_KEY
+  // A custom provider that names its own env var keeps using that var; the
+  // apiKey setting is the manual override for providers with no var of their own.
+  return configuredKey() || loadConfig().apiKey || process.env.ANTHROPIC_API_KEY
 }
 
 function keyHint(opts: AnthropicOpts): string {

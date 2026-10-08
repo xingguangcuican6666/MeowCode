@@ -2230,6 +2230,16 @@ export const CLIENT_APP_JS = `/**
   }
 
   function stringControl(row, disabled) {
+    // A secret row (the API key) is a password field showing the set/unset marker
+    // the server sent — /api/settings never transmits the value itself. Leaving
+    // the field untouched writes the marker back verbatim, so an untouched secret
+    // row must not be submitted at all.
+    if (row.secret) {
+      return '<input class="settings-ctrl-input settings-ctrl-text" type="password" value=""' +
+        ' data-setting="' + escapeHtml(row.key) + '" data-secret-display="' +
+        escapeHtml(String(row.display == null ? '' : row.display)) + '" spellcheck="false"' +
+        (disabled ? ' disabled' : '') + ' aria-label="' + escapeHtml(row.label) + '" />';
+    }
     return '<input class="settings-ctrl-input settings-ctrl-text" type="text" value="' +
       escapeHtml(String(row.value == null ? '' : row.value)) + '" data-setting="' +
       escapeHtml(row.key) + '" spellcheck="false"' + (disabled ? ' disabled' : '') +
@@ -2444,6 +2454,9 @@ export const CLIENT_APP_JS = `/**
       if (!el || el.tagName === 'BUTTON' || el.disabled) return;
       const row = settingRow(el.getAttribute('data-setting'));
       if (!row) return;
+      // An untouched secret field is empty (the value never reaches the browser),
+      // so submitting it would erase a stored key. Only a typed value writes.
+      if (row.secret && !el.value) { renderSettingsPane(); return; }
       const raw = el.value;
       const value = row.type === 'number' ? Number(raw) : row.type === 'boolean' ? raw === 'true' : raw;
       saveSetting(row.key, value);

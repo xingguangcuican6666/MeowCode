@@ -273,9 +273,6 @@ const config: SlashCommand = {
         ctx.setConfig({ system: value || undefined })
         ctx.print(value ? t('cmd.configSystemSet') : t('cmd.configSystemCleared'), 'system')
         return
-      case 'apikey':
-        ctx.print(t('cmd.configApiKeyReadonly'), 'system', { error: true })
-        return
       default: {
         const spec = SETTINGS_BY_KEY[key] ?? SETTINGS.find((s) => s.key.toLowerCase() === lower)
         if (spec) { setSchemaSetting(ctx, spec, value); return }

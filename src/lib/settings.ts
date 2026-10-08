@@ -32,6 +32,13 @@ export interface SettingSpec {
   description: string
   /** Omit for 'both'. 'tui' = the WebUI shows the row disabled; 'web' = /config hides it. */
   surfaces?: SettingSurface[]
+  /**
+   * Holds a credential. Listings (/config, the WebUI settings API) render it
+   * masked, and `formatSettingValue` collapses it to a set/unset marker, so the
+   * value never lands in a transcript or a settings dump. Editing still shows the
+   * real value — the user has to be able to correct what they typed.
+   */
+  secret?: boolean
 }
 
 // Ordered so /config groups read top-to-bottom like the real Config tab.
@@ -45,13 +52,15 @@ export const SETTINGS: SettingSpec[] = [
   { key: 'thinkingMode', label: 'Thinking mode', group: 'Context & model', type: 'enum', values: ['auto', 'off', 'on'], default: 'auto', description: 'Extended thinking before responding' },
   { key: 'effort', label: 'Reasoning effort', group: 'Context & model', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], default: 'medium', description: 'How much reasoning/verification the agent applies (set with /effort)' },
   { key: 'contextWindow', label: 'Context window override', group: 'Context & model', type: 'number', min: 0, max: 10_000_000, unit: ' tok', default: 0, description: 'Force the context-window size in tokens (0 = auto-detect from the model)' },
+  { key: 'apiBaseUrl', label: 'API endpoint', group: 'Context & model', type: 'string', default: '', description: 'Override the Messages API endpoint host (e.g. https://api.anthropic.com, or a relay base). Empty = ANTHROPIC_BASE_URL, else the official endpoint' },
+  { key: 'apiKeySetting', label: 'API key', group: 'Context & model', type: 'string', default: '', secret: true, description: 'Key sent to the API endpoint. Overrides ANTHROPIC_API_KEY and takes effect immediately. Prefer an env var or /login when you can — this value is stored in plaintext in settings.json' },
   // Interface
   { key: 'showTips', label: 'Show tips', group: 'Interface', type: 'boolean', default: true, description: 'Occasional usage tips in the footer' },
   { key: 'draftedFeedback', label: 'Claude-drafted feedback', group: 'Interface', type: 'boolean', default: true, description: 'Offer a drafted message when reporting feedback' },
   { key: 'reduceMotion', label: 'Reduce motion', group: 'Interface', type: 'boolean', default: false, description: 'Minimize spinners and animations' },
   { key: 'promptSuggestions', label: 'Prompt suggestions', group: 'Interface', type: 'boolean', default: true, description: 'Suggest follow-up prompts' },
   { key: 'sessionRecap', label: 'Session recap', group: 'Interface', type: 'boolean', default: true, description: 'Recap what happened when resuming a session' },
-  { key: 'verbose', label: 'Verbose output', group: 'Interface', type: 'boolean', default: false, description: 'Show full, untruncated tool output' },
+  { key: 'verbose', label: 'Verbose output', group: 'Interface', type: 'boolean', default: false, description: 'Expand every thinking/tool fold and show full, untruncated tool output. Turning it on also makes fold clicks stop working — clicks only make sense once folds default to closed' },
   { key: 'progressBar', label: 'Terminal progress bar', group: 'Interface', type: 'boolean', default: true, description: 'Draw a progress bar in the terminal title' },
   { key: 'showTurnDuration', label: 'Show turn duration', group: 'Interface', type: 'boolean', default: true, description: 'Display how long each turn took' },
   { key: 'timeFormat', label: 'Time format', group: 'Interface', type: 'enum', values: ['24h', '12h'], default: '24h', description: 'Clock format for timestamps' },
@@ -131,6 +140,12 @@ export function getSetting(bag: Record<string, SettingValue> | undefined, key: s
 export function formatSettingValue(spec: SettingSpec, value: SettingValue): string {
   if (spec.type === 'boolean') return value ? 'on' : 'off'
   if (spec.type === 'number') return `${value}${spec.unit ?? ''}`
+  // A credential is never echoed back into a transcript: say whether one is set
+  // and how long, which is enough to tell "wrong key" from "no key".
+  if (spec.secret) {
+    const n = String(value ?? '').length
+    return n ? `set (${n} chars)` : 'unset'
+  }
   return String(value)
 }
 

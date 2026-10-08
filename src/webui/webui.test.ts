@@ -549,6 +549,26 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     const reread: any = await (await get('/api/settings')).json()
     const after = reread.settings.find((s: any) => s.key === 'verbose')
     expect(after.value).toBe(!before)
+
+    // The endpoint and the key are both settable from either surface, and the key
+    // never crosses the wire: it goes out masked, in a `display` field.
+    const secretRow = reread.settings.find((s: any) => s.key === 'apiKeySetting')
+    expect(secretRow.secret).toBe(true)
+    expect(['unset', 'set (0 chars)']).toContain(secretRow.display)
+    expect(JSON.stringify(secretRow)).not.toMatch(/sk-/)
+    const keyRes = await post('/api/config', { settings: { apiKeySetting: 'sk-test-value' } })
+    expect(keyRes.status).toBe(200)
+    const withKey: any = await (await get('/api/settings')).json()
+    const set = withKey.settings.find((s: any) => s.key === 'apiKeySetting')
+    expect(set.display).toBe('set (13 chars)')
+    expect(JSON.stringify(set)).not.toContain('sk-test-value')
+    await post('/api/config', { settings: { apiKeySetting: '' } })
+
+    const baseRes = await post('/api/config', { settings: { apiBaseUrl: 'https://relay.example.com' } })
+    expect(baseRes.status).toBe(200)
+    const withBase: any = await (await get('/api/settings')).json()
+    expect(withBase.settings.find((s: any) => s.key === 'apiBaseUrl').value).toBe('https://relay.example.com')
+    await post('/api/config', { settings: { apiBaseUrl: '' } })
   })
 
   it('serves the shared message catalog so the browser stops shipping its own', async () => {
