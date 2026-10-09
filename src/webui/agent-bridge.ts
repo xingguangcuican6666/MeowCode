@@ -7,6 +7,7 @@ import { isCommand } from '../commands'
 import { runTool, toolSchemas, summarizeToolCall } from '../tools'
 import { decidePermission, isPermissionMode, matchPermissionRule, DENY_RULE_REASON } from '../tools/permission'
 import { newSessionId, saveSession, loadSession, listSessions, deleteSession, renameSession, type SessionMeta } from '../lib/sessions'
+import { withLiveKey } from '../config'
 import type {
   AgentEvent,
   AgentSnapshot,
@@ -25,8 +26,9 @@ import { standingPreamble } from '../lib/memory'
 import { projectInstructionsPreamble } from '../lib/projectInstructions'
 import { customAgentCatalog } from '../tools/orchestration'
 import { runHooks } from '../lib/hooks'
-import { getSetting, effortDirective, outputStyleDirective, workflowSizeDirective, resolveThinkingBudget } from '../lib/settings'
+import { getSetting, effortDirective, outputStyleDirective, workflowSizeDirective, resolveThinkingBudget, type SettingValue } from '../lib/settings'
 import { emptyUsage } from '../lib/usage'
+import { redactSettings } from '../lib/credentials'
 import { estimateTokens } from '../lib/tokens'
 import { computeCost } from '../lib/pricing'
 import { changeSummary } from '../lib/transcript'
@@ -105,9 +107,41 @@ export class AgentBridge {
     this.flushSave()
   }
 
+  /**
+   * The config as anything OUTSIDE this process may see it.
+   *
+   * Two credentials come off: `apiKey` (env-sourced, never leaves the host) and
+   * the `apiKeySetting` row (the hand-typed key, which config.ts resolves into
+   * the in-memory bag). The row is DELETED rather than masked with a marker —
+   * see redactSettings — because this object flows BACK into updateConfig from
+   * several directions (`/config <key> <value>` in the browser, which rebuilds
+   * the whole bag from the one it read; POST /api/config with a whole bag), and
+   * a placeholder on that path overwrites the user's real key with the literal
+   * string 'set'.
+   *
+   * Everything reaching this accessor is a sink: GET /api/config, the
+   * config:update SSE broadcast, getState()'s config (broadcast too), the
+   * command context, the plugin context, and the title summarizer's own copy.
+   * For a listing that must REPORT that a credential exists, read
+   * `liveSettings()` and format a marker — do not re-add the row here.
+   */
   public getConfig(): AppConfig {
     const { apiKey: _omit, ...safe } = this.config
-    return safe as AppConfig
+    return { ...safe, settings: redactSettings(safe.settings) } as AppConfig
+  }
+
+  /**
+   * The settings bag with credentials INTACT — for the few in-process callers
+   * that must see the real value: /api/settings computing its "set (13 chars)"
+   * marker, and re-resolving the credential row when a resumed session's config
+   * is adopted (a stored snapshot is redacted, so merging it in blindly would
+   * drop the key from the live bag and the next save would clear it).
+   *
+   * Deliberately NOT exported over HTTP or handed to a plugin: everything
+   * crossing a boundary goes through getConfig().
+   */
+  public liveSettings(): Record<string, SettingValue> {
+    return this.config.settings ?? {}
   }
 
   public updateConfig(patch: Partial<AppConfig>): AppConfig {
@@ -188,7 +222,12 @@ export class AgentBridge {
     this.messages = snap.messages || []
     this.usage = snap.usage || emptyUsage()
     if (snap.config) {
-      this.config = { ...this.config, ...snap.config }
+      // Same rule as cli.tsx's resumeConfig: a stored snapshot is written
+      // REDACTED, so spreading it in would drop the credential row and the next
+      // save would call saveApiKey('') — or, for a file written before
+      // redaction, put a stale key back over the current one. withLiveKey
+      // re-resolves the row from credentials.json.
+      this.config = withLiveKey({ ...this.config, ...snap.config })
     }
     this.turnSeq = this.messages.filter((m) => m.role === 'user').length
     return true

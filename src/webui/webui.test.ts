@@ -919,6 +919,35 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     }
   })
 
+  it('never carries the key out, and a /config edit does not write one back', async () => {
+    // c64d160 moved the hand-typed key INTO the settings bag (config.ts resolves
+    // it there), while GET /api/config only stripped the old top-level `apiKey`.
+    // The row is now redacted, which is safe on this path precisely because
+    // updateConfig merges: setSchemaSetting rebuilds the bag it read and posts it
+    // back, so a `set` marker rather than a deleted row would have replaced the
+    // user's key with the literal string 'set'.
+    const keyRes = await post('/api/config', { settings: { apiKeySetting: 'sk-round-trip' } })
+    expect(keyRes.status).toBe(200)
+    try {
+      for (const path of ['/api/config', '/api/settings', '/api/session/state']) {
+        expect(await (await get(path)).text(), `${path} must not carry the key`).not.toContain('sk-round-trip')
+      }
+      // The marker the settings panel renders still has to be right, which is why
+      // /api/settings reads liveSettings() rather than the redacted bag.
+      const rows: any = await (await get('/api/settings')).json()
+      expect(rows.settings.find((s: any) => s.key === 'apiKeySetting').display).toBe('set (13 chars)')
+
+      const edit = await post('/api/commands/run', { command: '/config apiBaseUrl https://relay.example.com' })
+      expect(edit.status).toBe(200)
+      const after: any = await (await get('/api/settings')).json()
+      expect(after.settings.find((s: any) => s.key === 'apiBaseUrl').value).toBe('https://relay.example.com')
+      expect(after.settings.find((s: any) => s.key === 'apiKeySetting').display).toBe('set (13 chars)')
+      await post('/api/commands/run', { command: '/config apiBaseUrl' })
+    } finally {
+      await post('/api/config', { settings: { apiKeySetting: '' } })
+    }
+  })
+
   it('queues a follow-up line for the running turn and refuses empty text', async () => {
     const ok = await post('/api/turn/queue', { text: 'and then summarize the diff' })
     expect(ok.status).toBe(200)

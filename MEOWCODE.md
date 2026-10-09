@@ -49,7 +49,18 @@ npm run start       # node dist/cli.js
   `mock` unless `ANTHROPIC_API_KEY` is set.
 - Config, sessions, and cross-session memory persist to `~/.meowcode/`:
   `settings.json`, `sessions/`, `memory/` (`MEMORY.md` index), `credentials.json`,
-  `history.json`. API keys are **never** written to disk — always env-sourced.
+  `history.json`. `ANTHROPIC_API_KEY` is env-sourced and never written anywhere;
+  the hand-typed `apiKeySetting` key has exactly one home,
+  `credentials.json` (0600, never `settings.json`). It IS in memory in the
+  settings bag, so every sink on the way out — `GET /api/config`, the
+  `config:update` broadcast, session files, launcher `config/get`, a plugin's
+  config — goes through `redactSettings` (credentials.ts), which **deletes** the
+  row rather than masking it: the bag flows back into `saveApiKey` through
+  `updateConfig`'s merge, so a placeholder would overwrite the real key. A
+  listing that must show the key exists reads `AgentBridge.liveSettings()` and
+  formats its own marker; a config adopted from disk goes through
+  `withLiveKey` (config.ts), which re-resolves the row or the first save after a
+  `/resume` erases it.
 - The pre-rename `~/.anycode/` is dead: `src/lib/legacyDir.ts` detects it at
   startup (before the entry is resolved, before the TUI mounts) and offers an
   **additive** merge into `~/.meowcode` — nothing is ever deleted from the old
@@ -129,7 +140,8 @@ tui` is refused).
   permissions/customProviders) replace whole when `entry.json` carries them.
 - Content resources resolve **entry → global → project**.
 - Machine-global (never per-entry): `credentials.json`, usage stats, update
-  cache. API key is always env-sourced, never from entry files.
+  cache. The `apiKeySetting` row is never in an entry file either — an entry is a
+  bundle that travels wherever it is copied, so `saveApiKey` is its only writer.
 - Config persistence goes through `entryAwareSaveConfig` (global mode → plain
   `saveConfig`). Installer: `meowcode entry install <npm pkg | git url | local
   path>` reads the `meowcode.entry` template field from the package manifest;
@@ -154,7 +166,7 @@ tui` is refused).
   protocol `2025-meowcode-launcher-1`). Host methods: `agent/turn` (+
   `agent/event` stream), `agent/abort` (stop the in-flight turn; `aborted:false`
   when nothing runs, never an error), `tools/list`, `tools/call`, `config/get`
-  (no apiKey), `session/state`, `session/reset`. Transcript stays host-side
+  (credentials stripped), `session/state`, `session/reset`. Transcript stays host-side
   (TUI-identical rows, `/resume`-compatible, autosaved to the shared
   `sessions/`); turns run `bypassPermissions` with entry `permissions` rules
   bound. Print mode bypasses the launcher. Lists mark these entries `[launcher]`

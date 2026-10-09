@@ -8,10 +8,12 @@
 //
 // Everything here is best-effort and never throws: a missing/corrupt file just
 // means "that session is gone", and a failed write silently drops that one
-// autosave. The stored config never carries the API key (same rule as saveConfig).
+// autosave. The stored config carries no credential: neither the env key nor the
+// `apiKeySetting` row (see stripCredentials and config.ts).
 import path from 'node:path'
 import fs from 'node:fs'
 import { loadConfig } from '../config'
+import { redactSettings } from './credentials'
 import { stateDir } from './entries'
 import { getSetting } from './settings'
 import { summarizeTitle } from './summarize'
@@ -96,7 +98,10 @@ function realCount(snap: SessionSnapshot): number {
 
 // Write (or overwrite) a session under `id`. No-op for an empty transcript, so
 // quitting a just-opened session never litters the list. The API key is stripped
-// from the stored config, exactly like saveConfig.
+// from the stored config, exactly like saveConfig — and so is the `apiKeySetting`
+// row, which is where the hand-typed key actually lives now (see redactSettings:
+// the row is DELETED, not masked, because this config is read back and merged on
+// resume, where a placeholder would overwrite the real key).
 // The title is a model-written one-line summary of the conversation (falls back
 // to the first user message when the summarizer is unavailable, so saving never
 // blocks on the network). Called on every debounced autosave, so it must be
@@ -105,11 +110,21 @@ export function saveSession(id: string, snap: SessionSnapshot): void {
   try {
     if (realCount(snap) === 0) return
     fs.mkdirSync(sessionsDir(), { recursive: true })
-    const { apiKey: _omit, ...config } = snap.config
-    void persistSession(id, snap, config as SessionSnapshot['config'])
+    void persistSession(id, snap, stripCredentials(snap.config))
   } catch {
     // best-effort; session persistence is non-critical
   }
+}
+
+// The config as it may be WRITTEN: no env-sourced key, no credential row. Every
+// path that puts a snapshot on disk goes through this, so a session file can hold
+// neither secret. `redactSettings` drops the row entirely — see its doc comment
+// for why a marker is not good enough on a config that flows back into
+// saveApiKey() — while `apiKey` (the env key, kept out for a different reason)
+// is dropped by the destructure.
+function stripCredentials(config: SessionSnapshot['config']): SessionSnapshot['config'] {
+  const { apiKey: _omit, ...safe } = config
+  return { ...safe, settings: redactSettings(safe.settings) }
 }
 
 // How often to re-summarize the title: only when the message count grows by at
@@ -255,14 +270,13 @@ export function renameSession(id: string, newTitle: string, initialSnap?: Sessio
     }
     if (initialSnap) {
       fs.mkdirSync(sessionsDir(), { recursive: true })
-      const { apiKey: _omit, ...config } = initialSnap.config
       const newRec: SavedSession = {
         id,
         savedAt: Date.now(),
         cwd: process.cwd(),
         title: trimmed,
         messageCount: realCount(initialSnap),
-        snapshot: { ...initialSnap, config: config as SessionSnapshot['config'] },
+        snapshot: { ...initialSnap, config: stripCredentials(initialSnap.config) },
       }
       fs.writeFileSync(fileFor(id), JSON.stringify(newRec))
       return true

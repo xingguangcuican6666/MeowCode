@@ -1,12 +1,18 @@
-// Persistent login credentials for the `newapi` provider (see /login, /logout).
+// Persistent credentials: the `newapi` login (see /login, /logout) AND the
+// `apiKeySetting` row's hand-typed key. Both live in this one file, at 0600.
 //
 // This is DELIBERATELY separate from settings.json (see src/config.ts, which
-// strips `apiKey` before every write). settings.json must never hold a key; a
-// login credential is different — it is written only by an explicit /login, to
-// its own file, with 0600 permissions. That keeps the "never silently persist
-// the env-sourced key" rule intact while still letting /login survive a restart
-// (and /logout revoke it). The relay key here authorizes model calls through
-// new-api's Anthropic-compatible `/v1/messages` endpoint.
+// strips both the `apiKey` field and the credential row before every write).
+// settings.json must never hold a key: it is a 0666 preferences file readable by
+// every account on the machine. A login credential is different — it is written
+// only by an explicit /login — but the hand-typed key has no such ceremony, so
+// it gets the same 0600 file rather than a second rule. `saveApiKey` is the one
+// place that stores that row, and `redactSettings` the one place that strips it
+// from anything on its way out (see its doc comment for why it deletes the row
+// rather than masking it).
+//
+// The relay key here authorizes model calls through new-api's Anthropic-
+// compatible `/v1/messages` endpoint.
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -133,6 +139,12 @@ export function clearCredentials(): void {
 }
 
 // The rows whose value is a credential. `apiKeySetting` is the only one today.
+// Kept next to redactSettings rather than derived from SETTINGS[].secret: this
+// list decides what may CROSS A BOUNDARY (a file, an HTTP body, another
+// process), while `secret: true` decides what a user-facing LISTING shows. They
+// happen to name the same row today, but a display-only secret would break the
+// redaction and a transport-only secret would break the display if either list
+// were derived from the other.
 const SECRETS = new Set(['apiKeySetting'])
 
 /**
@@ -162,17 +174,38 @@ export function keySource(): 'setting' | 'login' | 'oauth' | 'env' | null {
 }
 
 /**
- * A copy of the settings bag with every credential value replaced by a set/unset
- * marker — for the /api/config dump, /doctor, or any log that must not carry a
- * key. The KEY NAMES are kept, so a redacted dump still shows which credentials
- * exist; only their values are gone.
+ * A copy of the settings bag with every credential row REMOVED — for the
+ * /api/config dump, a session file, a plugin's view of the config, or any log
+ * that must not carry a key.
+ *
+ * The row is DELETED, not replaced with a `set` marker, and that distinction is
+ * load-bearing. A marker like `'set'` is honest for a dump that provably ends
+ * here — /api/settings builds its own "set (13 chars)" marker and needs the
+ * value to compute it. But the settings bag is not read-only: it flows BACK into
+ * `saveApiKey()` through `AgentBridge.updateConfig`'s merge
+ * (`{...live, ...patch.settings}`) and through `/config <key> <value>` in the
+ * browser, which rebuilds the whole bag from the one it read. A placeholder in
+ * that path is not a redaction — it is a value, and it overwrites the user's
+ * real key with the literal string `set`:
+ *
+ *     key before          : sk-ant-SECRET-abc123
+ *     after one /config   : "set"
+ *
+ * Deleting is safe in that path precisely because the merge can only ADD keys:
+ * an absent row leaves the live one untouched. So the same redaction is correct
+ * at every sink, with no need to classify sinks by whether they can write back.
+ *
+ * A caller that needs to SHOW that a credential exists must read it live
+ * (`AgentBridge.liveSettings`) and format a marker itself — never from a
+ * redacted copy.
  */
 export function redactSettings(
   bag: Record<string, boolean | string | number> | undefined,
 ): Record<string, boolean | string | number> {
   const out: Record<string, boolean | string | number> = {}
   for (const [k, v] of Object.entries(bag ?? {})) {
-    out[k] = SECRETS.has(k) && String(v ?? '').trim() ? 'set' : v
+    if (SECRETS.has(k)) continue
+    out[k] = v
   }
   return out
 }

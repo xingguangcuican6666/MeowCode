@@ -37,6 +37,11 @@ export interface SettingSpec {
    * masked, and `formatSettingValue` collapses it to a set/unset marker, so the
    * value never lands in a transcript or a settings dump. Editing still shows the
    * real value — the user has to be able to correct what they typed.
+   *
+   * This is a DISPLAY rule, not a transport one. It says what a user-facing
+   * listing may show; whether a value may CROSS A BOUNDARY is decided by
+   * credentials.ts's own list, because those two lists would diverge the moment
+   * one gained a row the other did not. See redactSettings.
    */
   secret?: boolean
 }
@@ -53,7 +58,7 @@ export const SETTINGS: SettingSpec[] = [
   { key: 'effort', label: 'Reasoning effort', group: 'Context & model', type: 'enum', values: ['low', 'medium', 'high', 'xhigh', 'max'], default: 'medium', description: 'How much reasoning/verification the agent applies (set with /effort)' },
   { key: 'contextWindow', label: 'Context window override', group: 'Context & model', type: 'number', min: 0, max: 10_000_000, unit: ' tok', default: 0, description: 'Force the context-window size in tokens (0 = auto-detect from the model)' },
   { key: 'apiBaseUrl', label: 'API endpoint', group: 'Context & model', type: 'string', default: '', description: 'Override the Messages API endpoint host (e.g. https://api.anthropic.com, or a relay base). Empty = ANTHROPIC_BASE_URL, else the official endpoint' },
-  { key: 'apiKeySetting', label: 'API key', group: 'Context & model', type: 'string', default: '', secret: true, description: 'Key sent to the API endpoint. Overrides ANTHROPIC_API_KEY and takes effect immediately. Prefer an env var or /login when you can — this value is stored in plaintext in settings.json' },
+  { key: 'apiKeySetting', label: 'API key', group: 'Context & model', type: 'string', default: '', secret: true, description: 'Key sent to the API endpoint. Overrides ANTHROPIC_API_KEY and takes effect immediately. Prefer an env var or /login when you can — this value is stored in plaintext in credentials.json (owner-only, 0600), never in settings.json' },
   // Interface
   { key: 'showTips', label: 'Show tips', group: 'Interface', type: 'boolean', default: true, description: 'Occasional usage tips in the footer' },
   { key: 'draftedFeedback', label: 'Claude-drafted feedback', group: 'Interface', type: 'boolean', default: true, description: 'Offer a drafted message when reporting feedback' },

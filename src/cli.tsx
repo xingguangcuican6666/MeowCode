@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream'
 import { render } from 'ink'
 import { App, type SessionSnapshot } from './app'
 import type { AppConfig } from './types'
-import { loadConfig } from './config'
+import { loadConfig, withLiveKey } from './config'
 import { getProvider } from './providers'
 import { NAME, VERSION } from './version'
 import { newSessionId, saveSession, loadSession, latestSession, forkSession } from './lib/sessions'
@@ -283,6 +283,24 @@ function openTermSession(): TermSession {
   return { wrapped, restore }
 }
 
+// The config a session read off disk gets adopted with. Two corrections, and
+// both are load-bearing rather than belt-and-braces:
+//
+//   1. `apiKey` — the env-sourced key, which no session file has ever carried.
+//   2. The `apiKeySetting` row — session files are written REDACTED (see
+//      sessions.ts's stripCredentials), so a naive spread would hand the app a
+//      bag with no key row, and the first save would call saveApiKey('') and
+//      erase credentials.json. A file written before redaction existed carries a
+//      STALE row instead, which would resurrect a rotated-away key over the
+//      current one. withLiveKey re-resolves from credentials.json either way,
+//      which is the same thing loadConfig() does.
+//
+// One helper for /resume, --resume, --continue and --fork-session, so no resume
+// path can be the one that forgets.
+function resumeConfig(stored: AppConfig): AppConfig {
+  return { ...withLiveKey(stored), apiKey: process.env.ANTHROPIC_API_KEY }
+}
+
 // Interactive session. Both /clear and /compact tear down the Ink instance and
 // remount a fresh one — the reliable way to reset Ink's log-update accounting
 // and re-seed the transcript. /clear starts empty; /compact carries the folded
@@ -330,12 +348,16 @@ async function runInteractive(initial: AppConfig, resume?: { snapshot: SessionSn
       // /compact: keep the (folded) transcript, remount cleanly (same session).
       const onRepaint = (snap: SessionSnapshot): void => { resumed = false; remount(snap.config, snap) }
       // /resume: reopen a saved session — adopt its id so autosaves keep updating
-      // that file, and re-inject the env API key the stored config never carries.
+      // that file. The stored config carries no credential (session files are
+      // written redacted), so both keys are re-injected here: the env one the
+      // file never had, and the credential row from credentials.json — without
+      // that second one the first settings write after a resume would call
+      // saveApiKey('') and erase the user's key. See config.ts's withLiveKey.
       const onResume = (snap: SessionSnapshot, id: string): void => {
         sessionId = id
         last = null
         resumed = true
-        remount({ ...snap.config, apiKey: process.env.ANTHROPIC_API_KEY }, snap)
+        remount(resumeConfig(snap.config), snap)
       }
       // /fork: branch the current conversation. Freeze the original session file as
       // it stands now, then rotate to a fresh id so continued work lands in a new
@@ -617,7 +639,7 @@ async function main(): Promise<void> {
     const snap = forkedId ? loadSession(forkedId) : null
     if (forkedId && snap) {
       resume = { snapshot: snap, id: forkedId }
-      config = { ...snap.config, apiKey: process.env.ANTHROPIC_API_KEY }
+      config = resumeConfig(snap.config)
       if (model) config.model = model
       if (provider) config.provider = provider
     } else {
@@ -629,7 +651,7 @@ async function main(): Promise<void> {
     const snap = id ? loadSession(id) : null
     if (id && snap) {
       resume = { snapshot: snap, id }
-      config = { ...snap.config, apiKey: process.env.ANTHROPIC_API_KEY }
+      config = resumeConfig(snap.config)
       if (model) config.model = model
       if (provider) config.provider = provider
     } else {

@@ -258,9 +258,23 @@ export const CLIENT_SDK_JS = `/**
   // never a wall of raw keys.
   const remoteTable = {};
 
+  // The server inlines the full catalog as window.__MEOWCODE_BOOT_I18N__ (see
+  // client/html.ts), so the catalog is already in hand before the first paint —
+  // crucially before authReady, which is what lets the TOKEN GATE render
+  // translated even though /api/i18n sits behind the gate it is trying to get
+  // past. Same { lang, messages } shape as /api/i18n, so it merges identically.
+  // Defensive: a plugin-less or older host may ship no boot catalog, and the
+  // messages object may be empty — in that case loadRemoteCatalog still fetches.
+  const bootI18n = (typeof window !== 'undefined' && window.__MEOWCODE_BOOT_I18N__) || null;
+  if (bootI18n && bootI18n.messages) Object.assign(remoteTable, bootI18n.messages);
+
   const detectedLang = (function() {
     const saved = localStorage.getItem('meowcode_lang');
     if (saved === 'zh' || saved === 'en') return saved;
+    // The server resolved a language for this run; honour it before falling back
+    // to the browser's, so a Chinese-configured session does not open in English
+    // just because the navigator says so.
+    if (bootI18n && (bootI18n.lang === 'zh' || bootI18n.lang === 'en')) return bootI18n.lang;
     const nav = (navigator.language || navigator.userLanguage || '').toLowerCase();
     return nav.startsWith('zh') ? 'zh' : 'en';
   })();
@@ -344,9 +358,22 @@ export const CLIENT_SDK_JS = `/**
   // going back to the server, and there is no second response that could land
   // late and revert it.
   //
+  // When the server inlined a boot catalog (the common case), the table is
+  // ALREADY full before authReady, so this fetch is skipped: it would be the same
+  // bytes a second time, and it rides authReady, so it is also the one /api call
+  // that would wait on the gate the boot catalog exists to let us draw. The fetch
+  // stays as the fallback for a host that shipped no boot messages.
+  //
   // Declared here, called below authReady: calling it at this point would hit
   // that const's temporal dead zone and take the whole SDK down with it.
   function loadRemoteCatalog() {
+    if (Object.keys(remoteTable).length > 0) {
+      // Boot catalog already in hand — just make the first paint reflect it.
+      document.documentElement.setAttribute('lang', currentLang);
+      updateDomI18n();
+      emit('i18n:change', { lang: currentLang });
+      return Promise.resolve();
+    }
     return authReady
       .then(() => fetch('/api/i18n?lang=' + encodeURIComponent(currentLang), { credentials: 'same-origin' }))
       .then((r) => (r && r.ok ? r.json() : null))

@@ -245,4 +245,63 @@ describe('WebUI SDK auth handshake (executed)', () => {
     const r = await runSdk({ url: `${ORIGIN}/#token=${TOKEN}`, failAuth: true })
     expect(r.auth.authenticated).toBe(false)
   })
+
+  it('translates the gate from the inlined boot catalog, with no /api/i18n fetch', async () => {
+    // The gate renders BEFORE authentication, and /api/i18n is behind the token,
+    // so a locked page could never fetch the catalog — it drew the gate in raw key
+    // names ("显示的都是键名"). The server now inlines the catalog as
+    // window.__MEOWCODE_BOOT_I18N__; the SDK must read it so t() resolves the gate
+    // strings offline, and must then NOT spend a fetch on what it already holds.
+    const calls: string[] = []
+    const sandbox: Record<string, unknown> = {
+      console, Response, Headers, URL, Map, Set, Promise, setTimeout: () => 0,
+      location: { pathname: '/', search: '', hash: '' },
+      history: { replaceState: () => {} },
+      localStorage: { getItem: () => null, setItem: () => {} },
+      navigator: { language: 'en-US' },   // navigator says English…
+      crypto: { randomUUID: () => 'tab-1' },
+      EventSource: class {},
+      customElements: { define: () => {} },
+      document: {
+        readyState: 'complete', documentElement: { setAttribute: () => {} },
+        createElement: () => ({ setAttribute: () => {}, appendChild: () => {}, style: {} }),
+        head: { appendChild: () => {} }, addEventListener: () => {},
+        querySelectorAll: () => [], getElementById: () => null, querySelector: () => null,
+      },
+      window: {
+        MeowSDK: null, matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+        // …but the server resolved the session to Chinese, and shipped the catalog.
+        __MEOWCODE_BOOT_I18N__: {
+          lang: 'zh',
+          messages: {
+            'auth.gate.title': { zh: '需要访问令牌', en: 'Access token required' },
+            'auth.gate.badToken': { zh: '令牌无效，请从终端输出中复制完整令牌。', en: 'That token is not valid.' },
+          },
+        },
+      },
+      fetch: async (input: string) => {
+        const route = new URL(String(input), ORIGIN).pathname
+        calls.push(route)
+        const data = route === '/api/security' ? { authRequired: true, bypass: false, authenticated: false } : {}
+        return new Response(JSON.stringify(data), { status: 200 })
+      },
+    }
+    sandbox.globalThis = sandbox
+    vm.createContext(sandbox)
+    vm.runInContext(CLIENT_SDK_JS, sandbox, { filename: 'sdk.js' })
+    const sdk = (sandbox.window as { MeowSDK: Record<string, unknown> }).MeowSDK as {
+      auth: { ready: Promise<unknown> }
+      i18n: { t: (k: string) => string; getLang: () => string }
+    }
+    await sdk.auth.ready
+
+    // The gate's own strings resolve to the translation, never the key.
+    expect(sdk.i18n.t('auth.gate.title')).toBe('需要访问令牌')
+    expect(sdk.i18n.t('auth.gate.badToken')).toBe('令牌无效，请从终端输出中复制完整令牌。')
+    // The boot catalog decided the language — the server's resolution wins over
+    // the browser's navigator.
+    expect(sdk.i18n.getLang()).toBe('zh')
+    // And the catalog was in hand, so no /api/i18n round-trip was spent on it.
+    expect(calls.filter((c) => c === '/api/i18n')).toHaveLength(0)
+  })
 })

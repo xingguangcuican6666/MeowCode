@@ -1,4 +1,8 @@
-export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: string }> = [], apiToken = ''): string {
+export function generateWebUIHtml(
+  pluginScripts: Array<{ id: string; script: string }> = [],
+  apiToken = '',
+  bootI18n: { lang: string; messages: Record<string, { zh: string; en: string }> } | null = null,
+): string {
   // Inline script bodies are terminated by the *parser*, not by JavaScript: a
   // literal `</script` anywhere in the source — even inside a string or a
   // comment — ends the element right there. That turns one careless plugin file
@@ -14,6 +18,15 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   // The page carries this run's API token (see server.ts): every /api call the SDK
   // makes sends it back. JSON-encoded so it can never break out of the script.
   const tokenTag = `<script>window.__MEOWCODE_API_TOKEN__ = ${JSON.stringify(apiToken)};</script>`
+  // The message catalog, inlined so the FIRST paint translates with no network
+  // call. This matters most for the one view that renders BEFORE authentication —
+  // the token gate (client/app.ts renderAuthGate): /api/i18n sits behind the
+  // token, so a locked page could never fetch it and drew its gate in raw key
+  // names. The payload is the exact shape /api/i18n returns ({ lang, messages }),
+  // so the client merges it the same way; inlineSafe keeps a `</script` inside a
+  // translated string from closing the tag. JSON.stringify handles every other
+  // quoting concern.
+  const bootI18nTag = `<script>window.__MEOWCODE_BOOT_I18N__ = ${inlineSafe(JSON.stringify(bootI18n ?? { lang: 'en', messages: {} }))};</script>`
 
   return `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
@@ -34,6 +47,7 @@ export function generateWebUIHtml(pluginScripts: Array<{ id: string; script: str
   <link rel="stylesheet" href="/style.css" />
   <script type="module" src="/material-web.js"></script>
   ${tokenTag}
+  ${bootI18nTag}
 </head>
 <body>
   <div id="app">

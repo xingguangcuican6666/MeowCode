@@ -18,7 +18,7 @@
 //                                { aborted }, no error when nothing runs
 //   → tools/list    {}           Anthropic-format tool schemas
 //   → tools/call    { name, input } run one tool, returns the ToolResult
-//   → config/get    {}           the effective AppConfig (apiKey stripped)
+//   → config/get    {}           the effective AppConfig, credentials stripped
 //   → session/state {}           messages + usage of the host session
 //   → session/reset {}           drop the transcript (like /clear), fresh id
 //
@@ -44,6 +44,7 @@ import path from 'node:path'
 import { getProvider } from '../providers'
 import { runTool, toolSchemas, summarizeToolCall } from '../tools'
 import { newSessionId, saveSession } from './sessions'
+import { redactSettings } from './credentials'
 import type { AgentEvent, AgentSnapshot, AppConfig, Message, SessionUsage, WorkflowSnapshot } from '../types'
 import type { ToolContext } from '../tools/types'
 import { AGENT_SYSTEM, formatToolResult } from '../hooks/chat-helpers'
@@ -320,9 +321,14 @@ async function runTurn(l: LauncherSession, st: LauncherState, prompt: string): P
 async function dispatch(l: LauncherSession, st: LauncherState, method: string, params: any): Promise<unknown> {
   switch (method) {
     case 'config/get': {
-      // apiKey is env-sourced and never leaves the host process.
+      // Two secrets, two reasons, both gone: `apiKey` is env-sourced and never
+      // leaves the host process, and the `apiKeySetting` row is the hand-typed
+      // key (config.ts resolves it into the in-memory bag). The row is DELETED
+      // rather than masked — see redactSettings — because a plugin holding this
+      // config can hand it back to setConfig, and a placeholder there would
+      // overwrite the real key with the literal string 'set'.
       const { apiKey: _omit, ...safe } = st.config
-      return safe
+      return { ...safe, settings: redactSettings(safe.settings) }
     }
     case 'session/state':
       return { sessionId: st.sessionId, messages: st.messages, usage: st.usage }

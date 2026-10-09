@@ -188,8 +188,11 @@ const provider: SlashCommand = {
 
 // --- /config: core fields (provider/model/theme/system) + the broad settings
 // surface described in src/lib/settings.ts. Data-driven so new settings are a
-// single line in that table. The apiKey is shown but never settable here — it
-// comes from the environment and is never written to disk (see saveConfig).
+// single line in that table. The `apiKey` row is the ENV key: shown as set/unset
+// and never settable here, because it comes from the environment and is never
+// written to disk (see saveConfig). The hand-typed credential is a different
+// thing — the `apiKeySetting` row below, which IS settable, is stored in
+// credentials.json, and prints as a set/unset marker via formatSettingValue.
 function renderConfig(ctx: CommandContext): void {
   const c = ctx.config
   const lines: string[] = [t('cmd.configTitle'), '', t('cmd.configCore'),

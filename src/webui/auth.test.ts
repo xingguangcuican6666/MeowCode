@@ -140,6 +140,122 @@ describe('WebUI access control', () => {
     try {
       expect(open.token).toBe('')
       expect((await fetch(`http://127.0.0.1:${port + 1}/api/tools`)).status).toBe(200)
+      // The security probe tells the client not to bother with an exchange.
+      const sec = await (await fetch(`http://127.0.0.1:${port + 1}/api/security`)).json()
+      expect(sec).toMatchObject({ authRequired: false, bypass: true, authenticated: true })
+      // And /api/auth must not mint a cookie for a server that ignores it.
+      const auth = await fetch(`http://127.0.0.1:${port + 1}/api/auth`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: 'anything' }),
+      })
+      expect(auth.headers.get('set-cookie')).toBeNull()
     } finally { await open.close() }
   })
 })
+
+// The fragment→cookie exchange: the two routes the client (client/sdk.ts) calls
+// before it holds any credential, tested against the REAL server rather than a
+// mock. These existed, were deleted in a rewrite while the client kept calling
+// them, and NOTHING here went red — because the only auth coverage asserted the
+// blanket gate, never the exchange that gets a browser PAST it. A client-side
+// test cannot catch that: it mocks its own server. See the two-halves rule in
+// the project memory.
+describe('WebUI fragment→cookie exchange', () => {
+  let instance: WebUIServerInstance
+  const port = 44573
+  const base = `http://127.0.0.1:${port}`
+  const origin = { Origin: base }
+
+  // The token the browser can reuse without script: pull it out of Set-Cookie.
+  const cookieFrom = (res: Response): string => {
+    const raw = res.headers.get('set-cookie') || ''
+    const m = /meowcode_token=([^;]+)/.exec(raw)
+    return m ? `meowcode_token=${m[1]}` : ''
+  }
+  const postAuth = (token: unknown, extra: Record<string, string> = {}): Promise<Response> =>
+    fetch(`${base}/api/auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...origin, ...extra },
+      body: typeof token === 'string' && token === '__RAW_BAD_JSON__' ? '{oops' : JSON.stringify({ token }),
+    })
+
+  beforeAll(async () => {
+    instance = createWebUIServer({ port, host: '127.0.0.1', openBrowser: false })
+    await new Promise<void>((resolve) => { (instance as unknown as { listen: (p: number, cb: () => void) => void }).listen(port, resolve) })
+  })
+  afterAll(async () => { await instance?.close() })
+
+  it('GET /api/security is public and reports the requirement without the token', async () => {
+    const res = await fetch(`${base}/api/security`, { headers: origin })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body).toMatchObject({ authRequired: true, bypass: false, authenticated: false })
+    // The requirement's SHAPE, never the credential itself.
+    expect(JSON.stringify(body)).not.toContain(instance.token)
+  })
+
+  it('POST /api/auth with the right token sets a persistent HttpOnly cookie', async () => {
+    const res = await postAuth(instance.token)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ authenticated: true, authRequired: true, bypass: false })
+    const setCookie = res.headers.get('set-cookie') || ''
+    expect(setCookie).toContain('meowcode_token=')
+    expect(setCookie).toContain('HttpOnly')
+    expect(setCookie).toContain('SameSite=Strict')
+    // Max-Age is the whole point of a STABLE token — a session cookie would make
+    // the bookmarked URL stop working after a browser restart.
+    expect(setCookie).toMatch(/Max-Age=\d{5,}/)
+  })
+
+  it('the cookie it mints then authenticates the API and the SSE stream', async () => {
+    const cookie = cookieFrom(await postAuth(instance.token))
+    expect(cookie).not.toBe('')
+    // A normal API call carrying only the cookie — no header, no query token.
+    const state = await fetch(`${base}/api/session/state`, { headers: { ...origin, cookie } })
+    expect(state.status).toBe(200)
+    // And SSE, which can ONLY carry a cookie (EventSource sends no headers).
+    const sse = await fetch(`${base}/api/events`, { headers: { ...origin, cookie, Accept: 'text/event-stream' } })
+    expect(sse.status).toBe(200)
+    expect(sse.headers.get('content-type')).toContain('text/event-stream')
+    await sse.body?.cancel()
+    // /api/security now reports this request as authenticated, off the cookie.
+    const sec = await (await fetch(`${base}/api/security`, { headers: { ...origin, cookie } })).json() as { authenticated: boolean }
+    expect(sec.authenticated).toBe(true)
+  })
+
+  it('refuses a wrong token, a non-string token, and malformed JSON — distinctly', async () => {
+    expect((await postAuth('not-the-token')).status).toBe(401)
+    expect((await postAuth(12345)).status).toBe(400)       // a number must not String() into a compare
+    expect((await postAuth('')).status).toBe(400)
+    expect((await postAuth('   ')).status).toBe(400)
+    expect((await postAuth('__RAW_BAD_JSON__')).status).toBe(400)
+    // None of the refusals left a cookie behind.
+    for (const bad of ['not-the-token', 12345, '']) {
+      expect(cookieFrom(await postAuth(bad))).toBe('')
+    }
+  })
+
+  it('an explicit wrong token is refused even when a valid cookie rides along', async () => {
+    // The failure this guards: query/header precedence that drops the cookie would
+    // make a rejected token read the same as no token. Here a GOOD cookie must not
+    // rescue a BAD explicit token — otherwise the unlock form can never report
+    // "that token is wrong" to a browser that already has a stale cookie.
+    const cookie = cookieFrom(await postAuth(instance.token))
+    const res = await postAuth('not-the-token', { cookie })
+    expect(res.status).toBe(401)
+  })
+
+  it('still enforces Host and Origin — a foreign origin cannot run the exchange', async () => {
+    const res = await postAuth(instance.token, { Origin: 'https://evil.example' })
+    expect(res.status).toBe(403)
+    const sec = await fetch(`${base}/api/security`, { headers: { Origin: 'https://evil.example' } })
+    expect(sec.status).toBe(403)
+  })
+
+  it('does NOT exempt /api/i18n — a locked page draws its gate from the boot catalog', async () => {
+    // Only /api/auth and /api/security are public. /api/i18n behind the gate is
+    // deliberate: the page ships a static boot catalog so a locked first visit can
+    // still render the gate, rather than opening the catalog to the unauthed.
+    expect((await fetch(`${base}/api/i18n`, { headers: origin })).status).toBe(401)
+  })
+})
+

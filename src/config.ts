@@ -77,3 +77,35 @@ export function saveConfig(cfg: AppConfig): void {
     // best-effort; config persistence is non-critical
   }
 }
+
+/**
+ * Put the credential row back into a config that came from somewhere that has
+ * no key in it — a resumed session, above all.
+ *
+ * loadConfig() resolves the row from credentials.json on every call, so the LIVE
+ * config always has the current key. But a config read back off disk does not,
+ * and every such config is now written redacted (sessions.ts's stripCredentials,
+ * launcher config/get, AgentBridge.getConfig). Adopting one naively is a data
+ * loss bug in both directions:
+ *
+ *   - The row is ABSENT (the redacted case): `saveConfig` destructures the row
+ *     out and calls `saveApiKey('')`, which DELETES the stored key. The first
+ *     settings write after any `/resume` would silently log the user out.
+ *   - The row is PRESENT but STALE (a session file written before redaction
+ *     existed): the merge puts a rotated-away key back over the current one.
+ *
+ * Re-resolving from credentials.json fixes both, and matches the invariant the
+ * row already has — credentials.json is its one home, so the row always reports
+ * what is actually in force rather than what some file once said.
+ *
+ * Called at every adoption site: cli.tsx (--resume, --fork-session and /resume)
+ * and AgentBridge.loadSession.
+ */
+export function withLiveKey(cfg: AppConfig): AppConfig {
+  const storedKey = loadApiKey()
+  const { apiKeySetting: _drop, ...rest } = cfg.settings ?? {}
+  return {
+    ...cfg,
+    settings: storedKey ? { ...rest, apiKeySetting: storedKey } : rest,
+  }
+}

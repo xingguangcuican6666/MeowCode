@@ -25,6 +25,7 @@ import { AgentBridge } from './agent-bridge'
 import type { WebUIInteraction, WebUIInteractionResponse } from './agent-bridge'
 import { PluginManager } from './plugin-manager'
 import { generateWebUIHtml } from './client/html'
+import { AUTH_COOKIE } from './security'
 import { CLIENT_CSS } from './client/css'
 import { CLIENT_SDK_JS } from './client/sdk'
 import { CLIENT_APP_JS } from './client/app'
@@ -211,18 +212,58 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
   }
 
   /**
-   * The token a request presents, from the header, a bearer header, or the query.
+   * The token a request presents, from the header, a bearer header, the cookie,
+   * or the query.
    *
    * The query string is not decoration: `EventSource` cannot set request headers,
    * so /api/events is the one route a browser can only authenticate this way.
+   *
+   * The COOKIE is the other one, and it is what the fragment→cookie exchange at
+   * POST /api/auth exists to produce — the header and the query both require the
+   * raw token still to be lying around in the page, while the cookie is the one
+   * form that needs nothing from script (hence HttpOnly). A server that has a
+   * cookie but refuses to read it would lock out every page that did the
+   * exchange properly, which is the whole flow the printed `#token=` URL starts.
+   *
+   * The order matters for correctness, not tidiness: a caller that presents BOTH
+   * an explicit bad credential and a good cookie must be refused. Handing the
+   * query/header precedence and dropping the cookie entirely makes an explicit
+   * "this token is wrong" behave the same as no credential at all, so the client
+   * cannot tell a rejected token from a missing one.
    */
   const presentedToken = (req: IncomingMessage, url: URL): string => {
     const hdr = req.headers['x-meowcode-token']
     if (typeof hdr === 'string' && hdr) return hdr
     const auth = req.headers.authorization
     if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim()
+    const cookies = req.headers.cookie
+    if (cookies) {
+      for (const part of cookies.split(';')) {
+        const eq = part.indexOf('=')
+        if (eq < 0) continue
+        if (part.slice(0, eq).trim() === AUTH_COOKIE) {
+          const raw = part.slice(eq + 1).trim()
+          try {
+            return decodeURIComponent(raw)
+          } catch {
+            return raw
+          }
+        }
+      }
+    }
     return url.searchParams.get('token') ?? ''
   }
+
+  // 30 days: the printed `#token=` URL is meant to be bookmarkable and to survive
+  // closing the tab, and the cookie is scoped to this machine's browser profile.
+  // It is the SAME trust decision as ~/.meowcode/webui-token holding a stable
+  // per-user token (0600) — anyone who can read either can drive the agent — so
+  // persisting it does not widen who is authorized, it only stops the browser
+  // from asking again on every visit. Without an explicit Max-Age the cookie is a
+  // session cookie, and the user's bookmark silently stops working after a
+  // browser restart, which is exactly the complaint a stable token was meant to
+  // fix. Rotation is "delete ~/.meowcode/webui-token".
+  const COOKIE_MAX_AGE_S = 30 * 24 * 60 * 60
 
   const bridge = new AgentBridge(config, cwd)
   const pluginManager = new PluginManager(cwd)
@@ -784,19 +825,104 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
     // Everything under /api needs the run's token. The page itself is served
     // without one (it embeds the token for its own later calls).
     const isApi = pathname.startsWith('/api/')
-    if (requireAuth && isApi && !timingSafeEqual(presentedToken(req, url), authToken)) {
-      sendJson(res, 401, { error: 'Missing or invalid token. Open the URL printed by MeowCode (it carries ?token=…).' })
+    // TWO routes are exempt, and only these two, because the client cannot
+    // present a credential before it has one. The handshake in client/sdk.ts is
+    // strictly ordered — scrub the fragment, probe /api/security with no
+    // credential at all, then spend the fragment at POST /api/auth — so without
+    // these exemptions the page's very first requests 401, `auth.authenticated`
+    // never becomes true, and the gate the user is trying to get past is what
+    // every printed link lands on. `/api/i18n` is deliberately NOT exempt: the
+    // page carries a static boot catalog (html.ts) precisely so a locked first
+    // visit can still draw the gate in the right language.
+    //
+    // Both still pass the Host and Origin checks above, so being public means
+    // "no token needed", not "reachable from anywhere".
+    const isAuthExchange =
+      (req.method === 'POST' && pathname === '/api/auth') ||
+      (req.method === 'GET' && pathname === '/api/security')
+    if (requireAuth && isApi && !isAuthExchange && !timingSafeEqual(presentedToken(req, url), authToken)) {
+      sendJson(res, 401, { error: 'Missing or invalid token. Open the URL printed by MeowCode (it carries #token=…).' })
       return
     }
 
     try {
+
+      // API: the token exchange — the one route whose BODY carries a credential.
+      //
+      // This is the first half of the fragment→cookie handshake: the page reads
+      // the fragment (never transmitted to us), posts it here, gets an HttpOnly
+      // cookie back, and from then on authenticates by cookie — which is what
+      // lets EventSource attach a credential at all, since its constructor
+      // cannot send headers. Without this route the printed `#token=` URL can
+      // never become an authenticated page: the client would hold a token it has
+      // no way to spend, and the gate would be the only thing it could render.
+      //
+      // Deliberately narrow, because it is a public route that grants a
+      // credential: a non-empty string `token` only (a number or an object must
+      // not pass `String()` into a compare), no fallback to a cookie the body
+      // does not carry, and no cookie at all in bypass mode. The Host and Origin
+      // checks above already ran, so a hostile page still cannot reach it.
+      if (req.method === 'POST' && pathname === '/api/auth') {
+        let body: unknown
+        try {
+          body = await parseJsonBody(req)
+        } catch {
+          sendJson(res, 400, { error: 'Invalid JSON' })
+          return
+        }
+        const presented = (body as { token?: unknown } | null)?.token
+        if (typeof presented !== 'string' || !presented.trim()) {
+          sendJson(res, 400, { error: 'token must be a non-empty string' })
+          return
+        }
+        // An explicitly wrong credential is a refusal, never a silent downgrade
+        // to whatever cookie the browser happened to still hold.
+        if (!timingSafeEqual(presented.trim(), authToken)) {
+          sendJson(res, 401, { error: 'Invalid token' })
+          return
+        }
+        res.setHeader('Cache-Control', 'no-store')
+        if (requireAuth) {
+          res.setHeader('Set-Cookie', `${AUTH_COOKIE}=${encodeURIComponent(authToken)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${COOKIE_MAX_AGE_S}`)
+        }
+        sendJson(res, 200, { authRequired: requireAuth, bypass: !requireAuth, authenticated: true })
+        return
+      }
+
+      // API: what the client needs to know to render its auth state honestly.
+      //
+      // The second half of the handshake, and the reason /api/security is public
+      // at all: this is the ONE probe the page makes before it holds any
+      // credential, so it is what tells the client "auth is required here" (draw
+      // the gate) and "auth is bypassed" (skip the exchange entirely, which is
+      // why --no-auth opens with no token at all). `authenticated` is computed
+      // from THIS request's own cookie, so a stale one answers false rather than
+      // lying. The token itself never appears in the response — only the shape of
+      // the requirement.
+      if (req.method === 'GET' && pathname === '/api/security') {
+        res.setHeader('Cache-Control', 'no-store')
+        sendJson(res, 200, {
+          authRequired: requireAuth,
+          bypass: !requireAuth,
+          authenticated: !requireAuth || timingSafeEqual(presentedToken(req, url), authToken),
+        })
+        return
+      }
 
       // Static Assets
       if ((req.method === 'GET' || req.method === 'HEAD') && (pathname === '/' || pathname === '/index.html')) {
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
         res.writeHead(200)
         if (req.method === 'HEAD') return res.end()
-        const html = generateWebUIHtml(pluginManager.getFrontendScripts(), requireAuth ? authToken : '')
+        // Inline the catalog the page would otherwise fetch from /api/i18n. That
+        // route is behind the token gate, so a LOCKED page cannot reach it — which
+        // is why the token gate itself used to render in raw key names. Boot i18n
+        // carries the same { lang, messages } shape, resolved to this request's
+        // language, so the gate (and the first paint of the whole shell) is
+        // translated with no network call. Both languages ride along, so the
+        // in-page language switch needs no refetch either.
+        const bootI18n = { lang: reqLang, messages: { ...tuiMessages, ...WEBUI_MESSAGES } }
+        const html = generateWebUIHtml(pluginManager.getFrontendScripts(), requireAuth ? authToken : '', bootI18n)
         res.end(html)
         return
       }
@@ -1050,7 +1176,11 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
       // precisely so this import is safe.
       if (req.method === 'GET' && pathname === '/api/settings') {
         const lang = reqLang
-        const bag = bridge.getConfig().settings
+        // LIVE settings, not the redacted getConfig() one: this route has to see
+        // the real credential to compute its marker (below), which is exactly the
+        // thing that may not leave the browser. The row's VALUE stays in here —
+        // `value` is '' for a secret spec — so the response still carries no key.
+        const bag = bridge.liveSettings()
         sendJson(res, 200, {
           lang,
           groups: settingGroups().map((group) => settingGroupLabel(lang, group)),
