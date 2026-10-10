@@ -27,6 +27,12 @@ export const WEBUI_MESSAGES: Record<string, MessageEntry> = {
   'common.apply': { zh: '应用', en: 'Apply' },
   'common.cancel': { zh: '取消', en: 'Cancel' },
   'common.close': { zh: '关闭', en: 'Close' },
+  // The WebUI login dialog's submit button + a couple of chrome strings the TUI's
+  // keyboard-driven LoginPanel has no counterpart for.
+  'login.submit': { zh: '登录', en: 'Sign in' },
+  'login.oauthOpen': { zh: '打开授权页', en: 'Open authorization page' },
+  'login.oauthWaiting': { zh: '已在等待浏览器授权…授权后本页会自动完成。', en: 'Waiting for authorization in your browser… this dialog finishes automatically once you approve.' },
+  'login.success': { zh: '✓ 已登录', en: '✓ Signed in' },
   'common.command': { zh: '命令', en: 'Command' },
   'common.connected': { zh: '● 已连接', en: '● Connected' },
   'common.disconnected': { zh: '● 连接已断开', en: '● Disconnected' },

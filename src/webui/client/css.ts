@@ -1626,6 +1626,88 @@ html, body {
   align-self: center;
 }
 
+/* --- Login dialog (browser-native /login) ------------------------------- */
+.login-container { max-width: 460px; }
+.login-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.login-field { display: flex; flex-direction: column; gap: 6px; }
+/* A class selector's display:flex would otherwise beat the UA [hidden] rule, so
+   the 2FA field showed before a password login ever asked for it. */
+.login-field[hidden] { display: none; }
+.login-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.login-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-md);
+  padding: 10px 12px;
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--font-family-display);
+  font-size: 14px;
+  outline: none;
+  transition: border-color var(--md-motion-duration-short);
+}
+.login-input:focus { border-color: var(--md-sys-color-primary); }
+/* Segmented method switch. */
+.login-methods {
+  display: flex;
+  gap: 6px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  padding: 4px;
+}
+.login-method-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--font-family-display);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: var(--md-shape-full);
+  cursor: pointer;
+  transition: background var(--md-motion-duration-short), color var(--md-motion-duration-short);
+}
+.login-method-btn:hover { color: var(--md-sys-color-on-surface); }
+.login-method-btn.is-active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+.login-pane { display: flex; flex-direction: column; gap: 12px; }
+.login-pane[hidden] { display: none; }
+.login-note { margin: 0; line-height: 1.5; }
+.login-oauth-link {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.login-oauth-link:hover { filter: brightness(1.05); }
+.login-status { line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.login-error {
+  color: var(--md-sys-color-error);
+  font-size: 12.5px;
+  min-height: 0;
+}
+.login-error:empty { display: none; }
+
 /* File Picker */
 .file-picker-body {
   max-height: 380px;

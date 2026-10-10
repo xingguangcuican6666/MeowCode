@@ -425,6 +425,63 @@ export function generateWebUIHtml(
     </div>
   </div>
 
+  <!-- Login Modal Dialog (browser-native /login: OAuth / relay key / password) -->
+  <div id="login-modal" class="modal-backdrop" style="display:none;">
+    <div class="modal-container login-container" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <div class="modal-header">
+        <div class="modal-header-title-cluster">
+          <span class="material-symbols-outlined modal-icon">login</span>
+          <span class="modal-title" id="login-title" data-i18n="login.title">Sign in</span>
+        </div>
+        <button class="modal-close-btn" id="login-close-btn" data-i18n-title="common.close" title="Close (Esc)"><span class="material-symbols-outlined">close</span></button>
+      </div>
+      <div class="modal-body login-body">
+        <div class="login-field">
+          <label class="login-label" for="login-base" data-i18n="login.fieldBase">Instance URL</label>
+          <input id="login-base" class="login-input" type="text" autocomplete="off" spellcheck="false" placeholder="https://your-newapi.example.com" />
+        </div>
+        <div class="login-methods" role="tablist" aria-label="Login method">
+          <button type="button" class="login-method-btn is-active" data-method="oauth" role="tab" data-i18n="login.methodOAuth">Browser (OAuth)</button>
+          <button type="button" class="login-method-btn" data-method="key" role="tab" data-i18n="login.methodKey">Relay key</button>
+          <button type="button" class="login-method-btn" data-method="password" role="tab" data-i18n="login.methodPassword">Password</button>
+        </div>
+
+        <div class="login-pane" data-pane="oauth">
+          <p class="login-note text-dim text-xs" data-i18n="login.oauthManualHint">A browser page will open to authorize; approve it there and this dialog finishes automatically.</p>
+          <a id="login-oauth-url" class="login-oauth-link" href="#" target="_blank" rel="noopener" style="display:none;" data-i18n="login.oauthOpen">Open authorization page</a>
+        </div>
+        <div class="login-pane" data-pane="key" hidden>
+          <div class="login-field">
+            <label class="login-label" for="login-key" data-i18n="login.fieldKey">Relay key</label>
+            <input id="login-key" class="login-input" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" />
+          </div>
+        </div>
+        <div class="login-pane" data-pane="password" hidden>
+          <div class="login-field">
+            <label class="login-label" for="login-user" data-i18n="login.fieldUsername">Username</label>
+            <input id="login-user" class="login-input" type="text" autocomplete="username" spellcheck="false" />
+          </div>
+          <div class="login-field">
+            <label class="login-label" for="login-pass" data-i18n="login.fieldPassword">Password</label>
+            <input id="login-pass" class="login-input" type="password" autocomplete="current-password" />
+          </div>
+          <div class="login-field" id="login-2fa-field" hidden>
+            <label class="login-label" for="login-2fa" data-i18n="login.field2FA">2FA code</label>
+            <input id="login-2fa" class="login-input" type="text" autocomplete="one-time-code" inputmode="numeric" />
+          </div>
+        </div>
+
+        <div class="login-status text-dim text-xs" id="login-status" aria-live="polite"></div>
+        <div class="login-error" id="login-error" role="alert"></div>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-footer-hint text-dim text-xs" id="login-hint"></span>
+        <button class="m3-action-btn m3-btn-tonal" id="login-cancel-btn" data-i18n="common.cancel">Cancel</button>
+        <button class="m3-action-btn m3-btn-filled" id="login-submit-btn" data-i18n="login.submit">Sign in</button>
+      </div>
+    </div>
+  </div>
+
   <!-- M3 Workspace Info Modal Dialog -->
   <div id="workspace-info-modal" class="modal-backdrop" style="display:none;">
     <div class="modal-container workspace-info-container">

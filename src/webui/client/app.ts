@@ -1011,6 +1011,11 @@ export const CLIENT_APP_JS = `/**
     // idle branch did not.) Echo the typed line first, like the TUI does.
     if (isCommand(text)) {
       const name = text.slice(1).split(/\s+/)[0];
+      // /login and /logout are handled natively in the browser: the server command
+      // is TUI-only (it drives a terminal overlay), but the WebUI has its own login
+      // dialog, so open that instead of copying a CLI line.
+      if (name === 'login') { void openLoginModal(); return; }
+      if (name === 'logout') { void doWebLogout(); return; }
       // Terminal-only command: copy the CLI line (same as the palette), don't run
       // it as a prompt and don't fake a transcript row.
       if (commandIsTuiOnly(name)) {
@@ -1732,7 +1737,10 @@ export const CLIENT_APP_JS = `/**
         icon: CMD_ICONS[cmd.name] || 'terminal',
         group: paletteGroupFor(cmd.name),
         local: false,
-        tuiOnly: cmd.tuiOnly === true,
+        // /login and /logout are TUI-only as registry commands, but the browser
+        // runs them natively (login dialog / clear-credential), so they are not
+        // terminal-only here — don't show the "CLI only / copy" affordance.
+        tuiOnly: cmd.tuiOnly === true && cmd.name !== 'login' && cmd.name !== 'logout',
         aliases: cmd.aliases || [],
       });
     }
@@ -1933,6 +1941,10 @@ export const CLIENT_APP_JS = `/**
   // running one would print "terminal only" and do nothing.
   async function executePaletteCommand(cmd) {
     if (!cmd) return;
+    // /login and /logout are TUI-only as server commands, but the browser handles
+    // them itself — open the native login dialog / clear the credential.
+    if (cmd.name === 'login') { closeCommandPalette(); void openLoginModal(); return; }
+    if (cmd.name === 'logout') { closeCommandPalette(); void doWebLogout(); return; }
     if (cmd.local) {
       closeCommandPalette();
       await cmd.run();
@@ -2268,6 +2280,122 @@ export const CLIENT_APP_JS = `/**
   if (wsOpenFilesBtn) wsOpenFilesBtn.onclick = () => { closeWorkspaceInfo(); switchPanel('files'); };
   if (wsOpenToolsBtn) wsOpenToolsBtn.onclick = () => { closeWorkspaceInfo(); switchPanel('tools'); };
 
+  // --- Login dialog (browser-native /login: OAuth / relay key / username+password)
+  const loginModal = document.querySelector('#login-modal');
+  const loginBase = document.querySelector('#login-base');
+  const loginKey = document.querySelector('#login-key');
+  const loginUser = document.querySelector('#login-user');
+  const loginPass = document.querySelector('#login-pass');
+  const login2fa = document.querySelector('#login-2fa');
+  const login2faField = document.querySelector('#login-2fa-field');
+  const loginStatus = document.querySelector('#login-status');
+  const loginError = document.querySelector('#login-error');
+  const loginOauthUrl = document.querySelector('#login-oauth-url');
+  const loginSubmitBtn = document.querySelector('#login-submit-btn');
+  let loginMethod = 'oauth';
+  let login2FAFlow = null; // { flowToken, username } once a password login needs 2FA
+
+  function setLoginMethod(m) {
+    loginMethod = m;
+    if (!loginModal) return;
+    loginModal.querySelectorAll('.login-method-btn').forEach((b) => {
+      b.classList.toggle('is-active', b.getAttribute('data-method') === m);
+    });
+    loginModal.querySelectorAll('.login-pane').forEach((p) => {
+      p.hidden = p.getAttribute('data-pane') !== m;
+    });
+    if (loginError) loginError.textContent = '';
+    if (loginStatus) loginStatus.textContent = '';
+  }
+
+  async function openLoginModal() {
+    if (!loginModal) return;
+    login2FAFlow = null;
+    if (login2faField) login2faField.hidden = true;
+    if (loginError) loginError.textContent = '';
+    if (loginStatus) loginStatus.textContent = '';
+    if (loginOauthUrl) loginOauthUrl.style.display = 'none';
+    if (loginKey) loginKey.value = '';
+    if (loginPass) loginPass.value = '';
+    if (login2fa) login2fa.value = '';
+    try {
+      const info = await sdk.api.loginInfo();
+      if (loginBase && info && info.baseUrl) loginBase.value = info.baseUrl;
+      if (loginUser && info && info.as) loginUser.value = info.as;
+    } catch (_) { /* prefill is best-effort */ }
+    setLoginMethod('oauth');
+    loginModal.style.display = 'flex';
+    if (loginBase) loginBase.focus();
+  }
+  function closeLoginModal() {
+    if (loginModal) loginModal.style.display = 'none';
+  }
+
+  async function doWebLogout() {
+    try {
+      await sdk.api.logout();
+      sdk.ui.showToast({ message: sdk.i18n.t('cmd.logoutDone') || 'Logged out', type: 'info' });
+      await syncState({ keepTranscript: true });
+    } catch (e) {
+      sdk.ui.showToast({ message: e.message || String(e), type: 'error' });
+    }
+  }
+
+  async function submitLogin() {
+    if (!loginModal) return;
+    const baseUrl = loginBase ? loginBase.value.trim() : '';
+    if (loginError) loginError.textContent = '';
+    if (loginSubmitBtn) loginSubmitBtn.disabled = true;
+    try {
+      let body;
+      if (loginMethod === 'key') {
+        body = { method: 'key', baseUrl, key: loginKey ? loginKey.value : '' };
+      } else if (loginMethod === 'oauth') {
+        if (loginStatus) loginStatus.textContent = sdk.i18n.t('login.oauthWaiting');
+        body = { method: 'oauth', baseUrl };
+      } else if (login2FAFlow) {
+        body = { method: '2fa', baseUrl, code: login2fa ? login2fa.value.trim() : '', flowToken: login2FAFlow.flowToken, username: login2FAFlow.username };
+      } else {
+        body = { method: 'password', baseUrl, username: loginUser ? loginUser.value.trim() : '', password: loginPass ? loginPass.value : '' };
+      }
+      const res = await sdk.api.login(body);
+      if (res && res.needs2FA) {
+        login2FAFlow = { flowToken: res.flowToken || '', username: loginUser ? loginUser.value.trim() : '' };
+        if (login2faField) login2faField.hidden = false;
+        if (loginStatus) loginStatus.textContent = '';
+        if (login2fa) login2fa.focus();
+        return;
+      }
+      if (!res || !res.ok) {
+        if (loginStatus) loginStatus.textContent = '';
+        if (loginError) loginError.textContent = (res && res.error) || sdk.i18n.t('login.loginFailed');
+        return;
+      }
+      closeLoginModal();
+      sdk.ui.showToast({ message: sdk.i18n.t('login.success'), type: 'info' });
+      await syncState({ keepTranscript: true });
+    } catch (e) {
+      if (loginStatus) loginStatus.textContent = '';
+      if (loginError) loginError.textContent = e.message || String(e);
+    } finally {
+      if (loginSubmitBtn) loginSubmitBtn.disabled = false;
+    }
+  }
+
+  if (loginModal) {
+    loginModal.querySelectorAll('.login-method-btn').forEach((b) => {
+      b.addEventListener('click', () => setLoginMethod(b.getAttribute('data-method')));
+    });
+    const loginCancelBtn = document.querySelector('#login-cancel-btn');
+    const loginCloseBtn = document.querySelector('#login-close-btn');
+    if (loginCancelBtn) loginCancelBtn.onclick = closeLoginModal;
+    if (loginCloseBtn) loginCloseBtn.onclick = closeLoginModal;
+    if (loginSubmitBtn) loginSubmitBtn.onclick = submitLogin;
+    loginModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') { e.preventDefault(); submitLogin(); }
+    });
+  }
+
   // Global Escape key to dismiss modals
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -2275,6 +2403,7 @@ export const CLIENT_APP_JS = `/**
       closeCommandPalette();
       closeModelSelectorModal();
       closeWorkspaceInfo();
+      closeLoginModal();
       closeSettingsModal();
     }
   });
@@ -3075,6 +3204,20 @@ export const CLIENT_APP_JS = `/**
         if (cfg && typeof cfg === 'object') applyRemoteConfig(cfg);
       } catch (_) {}
       sdk.emit('config:update');
+    });
+
+    // OAuth login progress: the server streams the authorize URL and status while
+    // POST /api/login (method:oauth) waits on the loopback callback. Mirror them
+    // into the login dialog so the user can click the link and see what's happening.
+    sse.addEventListener('login:oauth', (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (d.status && loginStatus) loginStatus.textContent = d.status;
+        if (d.authUrl && loginOauthUrl) {
+          loginOauthUrl.href = d.authUrl;
+          loginOauthUrl.style.display = 'inline-flex';
+        }
+      } catch (_) {}
     });
 
     sse.addEventListener('interaction:request', (e) => {

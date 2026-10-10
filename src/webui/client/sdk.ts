@@ -756,6 +756,15 @@ export const CLIENT_SDK_JS = `/**
     async runCommand(command) {
       return await apiFetch('/api/commands/run', { method: 'POST', body: JSON.stringify({ command }) });
     },
+    async loginInfo() {
+      return await apiFetch('/api/login/info');
+    },
+    async login(body) {
+      return await apiFetch('/api/login', { method: 'POST', body: JSON.stringify(body || {}) });
+    },
+    async logout() {
+      return await apiFetch('/api/logout', { method: 'POST' });
+    },
     async listSettings() {
       return await apiFetch('/api/settings');
     },

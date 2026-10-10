@@ -32,6 +32,9 @@ import { CLIENT_APP_JS } from './client/app'
 import { MATERIAL_WEB_JS } from './client/material-web'
 import { workspaceFilesPlugin } from './plugins/workspace-files'
 import { stableWebUIToken } from './token-store'
+import { login as newapiLogin, submit2FA, fetchRelayKey, normalizeBase, resolveNewapiBase, logout as newapiLogout } from '../lib/newapi'
+import { loginWithOAuth, resolveOAuthClientId, revokeOAuth } from '../lib/oauth'
+import { saveCredentials, loadCredentials, clearCredentials, keySource, loadApiKey, saveApiKey } from '../lib/credentials'
 import { toolsInspectorPlugin } from './plugins/tools-inspector'
 import { promptTemplatesPlugin } from './plugins/prompt-templates'
 import { metricsMonitorPlugin } from './plugins/metrics-monitor'
@@ -1276,6 +1279,89 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
         }
         const printed = await runBrowserCommand(input, reqLang)
         sendJson(res, 200, { ok: true, messages: printed })
+        return
+      }
+
+      // API: login state, to pre-fill the browser login dialog. Never returns a
+      // key — only whether one is in force and the non-secret base/clientId/user.
+      if (req.method === 'GET' && pathname === '/api/login/info') {
+        const cur = loadCredentials()
+        sendJson(res, 200, {
+          baseUrl: cur?.baseUrl || resolveNewapiBase(),
+          clientId: resolveOAuthClientId(),
+          loggedIn: !!(cur && (cur.key || cur.oauth?.accessToken)),
+          how: keySource(),
+          as: cur?.session?.username || cur?.oauth?.scope ? cur?.session?.username : undefined,
+        })
+        return
+      }
+
+      // API: run a login. Mirrors the TUI LoginPanel's three methods (paste relay
+      // key / username+password[+2FA] / browser OAuth), reusing the same lib/newapi
+      // + lib/oauth primitives so the two front-ends can never drift. Credentials
+      // are written to ~/.meowcode/credentials.json (0600) and NEVER echoed back.
+      if (req.method === 'POST' && pathname === '/api/login') {
+        const body = await parseJsonBody(req)
+        const method = String(body?.method || '')
+        const baseUrl = String(body?.baseUrl || resolveNewapiBase())
+        const now = Date.now()
+        try {
+          if (method === 'key') {
+            const key = String(body?.key || '').trim()
+            if (!key) { sendJson(res, 400, { error: t('login.errKeyRequired') }); return }
+            saveCredentials({ baseUrl: normalizeBase(baseUrl), key, savedAt: now })
+            broadcastSSE('config:update', bridge.getConfig())
+            sendJson(res, 200, { ok: true })
+            return
+          }
+          if (method === 'password' || method === '2fa') {
+            const username = String(body?.username || '').trim()
+            const r = method === '2fa'
+              ? await submit2FA(baseUrl, String(body?.code || '').trim(), String(body?.flowToken || ''), username)
+              : await newapiLogin(baseUrl, username, String(body?.password || ''))
+            if (!r.ok) { sendJson(res, 200, { ok: false, error: r.error || t('login.loginFailed') }); return }
+            if (r.needs2FA) { sendJson(res, 200, { ok: false, needs2FA: true, flowToken: r.flowToken || '' }); return }
+            if (!r.session) { sendJson(res, 200, { ok: false, error: t('login.loginResponseError') }); return }
+            const relay = await fetchRelayKey(baseUrl, r.session.accessToken)
+            if (!relay) { sendJson(res, 200, { ok: false, error: t('login.noRelayToken') }); return }
+            saveCredentials({ baseUrl: normalizeBase(baseUrl), key: relay, session: r.session, savedAt: now })
+            broadcastSSE('config:update', bridge.getConfig())
+            sendJson(res, 200, { ok: true })
+            return
+          }
+          if (method === 'oauth') {
+            const clientId = String(body?.clientId || '').trim() || resolveOAuthClientId()
+            const r = await loginWithOAuth({
+              baseUrl,
+              clientId,
+              onStatus: (status) => broadcastSSE('login:oauth', { status }),
+              onAuthUrl: (authUrl) => broadcastSSE('login:oauth', { authUrl }),
+            })
+            if (!r.ok || !r.oauth) { sendJson(res, 200, { ok: false, error: r.error || t('login.oauthFailed') }); return }
+            saveCredentials({ baseUrl: normalizeBase(baseUrl), oauth: r.oauth, savedAt: now })
+            broadcastSSE('config:update', bridge.getConfig())
+            sendJson(res, 200, { ok: true })
+            return
+          }
+          sendJson(res, 400, { error: 'Unknown login method' })
+        } catch (err: any) {
+          sendJson(res, 200, { ok: false, error: err?.message || String(err) })
+        }
+        return
+      }
+
+      // API: log out — revoke the token family best-effort, then wipe the local
+      // credential while PRESERVING the hand-typed apiKeySetting (its one home is
+      // this same file), exactly as the /logout command does.
+      if (req.method === 'POST' && pathname === '/api/logout') {
+        const cur = loadCredentials()
+        if (cur?.oauth) { try { await revokeOAuth(cur.oauth) } catch { /* best-effort */ } }
+        else if (cur?.session) { try { await newapiLogout(cur.baseUrl, cur.session) } catch { /* best-effort */ } }
+        const keptKey = loadApiKey()
+        clearCredentials()
+        if (keptKey) saveApiKey(keptKey)
+        broadcastSSE('config:update', bridge.getConfig())
+        sendJson(res, 200, { ok: true })
         return
       }
 

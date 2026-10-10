@@ -966,6 +966,37 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(text === already.zh || text === already.en).toBe(true)
   })
 
+  it('logs in with a pasted relay key and reports it, then logs out — never echoing the key', async () => {
+    // The browser-native /login (key method) writes the credential to the mocked
+    // ~/.meowcode and the WebUI picks it up. OAuth/password hit the network, so only
+    // the offline key path is exercised here.
+    const before: any = await (await get('/api/login/info')).json()
+    expect(before.loggedIn).toBe(false)
+    // The non-secret base/clientId are safe to hand the dialog; a key never is.
+    expect(typeof before.baseUrl).toBe('string')
+    expect(JSON.stringify(before)).not.toContain('sk-')
+
+    const res: any = await (await post('/api/login', { method: 'key', baseUrl: 'https://relay.example.com', key: 'sk-probe-123' })).json()
+    expect(res.ok).toBe(true)
+
+    const after: any = await (await get('/api/login/info')).json()
+    expect(after.loggedIn).toBe(true)
+    expect(after.how).toBe('login')
+    // /api/login/info must never leak the key itself.
+    expect(JSON.stringify(after)).not.toContain('sk-probe-123')
+
+    const out: any = await (await post('/api/logout')).json()
+    expect(out.ok).toBe(true)
+    const final: any = await (await get('/api/login/info')).json()
+    expect(final.loggedIn).toBe(false)
+  })
+
+  it('rejects an empty or unknown login method', async () => {
+    expect((await post('/api/login', { method: 'nope' })).status).toBe(400)
+    const noKey: any = await (await post('/api/login', { method: 'key', key: '' })).json()
+    expect(noKey.ok ?? false).toBe(false)
+  })
+
   it('marks the commands whose bare form only switches a panel as needing an argument', async () => {
     const data: any = await (await get('/api/commands')).json()
     const byName = new Map<string, any>(data.commands.map((r: any) => [r.name, r]))
