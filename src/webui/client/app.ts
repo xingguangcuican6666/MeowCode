@@ -763,7 +763,11 @@ export const CLIENT_APP_JS = `/**
     row.className = 'message-row system' + (isError ? ' is-error' : '');
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    bubble.textContent = content;
+    // Render markdown, not plain text: a command's output is markdown (/help is a
+    // bulleted list, /status has code spans), and textContent collapsed every
+    // newline to a space — "/help" came out as one unreadable wall with literal
+    // ** and backticks. formatMarkdown escapes before it formats, so this is safe.
+    bubble.innerHTML = formatMarkdown(String(content == null ? '' : content));
     row.appendChild(bubble);
     chatTranscript.appendChild(row);
     scrollToBottom();
