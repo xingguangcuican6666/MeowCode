@@ -152,9 +152,20 @@ function authHeaders(apiKey: string, auth: 'x-api-key' | 'bearer' | undefined): 
 }
 
 async function post(url: string, body: unknown, apiKey: string, auth: 'x-api-key' | 'bearer' | undefined, signal?: AbortSignal): Promise<Response> {
+  // A streaming request (body.stream === true) also advertises it in the Accept
+  // header. Anthropic streams on the body flag alone, but a new-api / OpenAI-compat
+  // relay in front keys its streaming (and its 流/非流 accounting) off this header,
+  // so without it the relay buffers the whole reply and hands it back at once — the
+  // "非流 / no token-by-token" the WebUI showed. Harmless for the native API.
+  const streaming = !!(body && typeof body === 'object' && (body as { stream?: unknown }).stream)
   return fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...authHeaders(apiKey, auth), 'anthropic-version': API_VERSION },
+    headers: {
+      'content-type': 'application/json',
+      ...(streaming ? { accept: 'text/event-stream' } : {}),
+      ...authHeaders(apiKey, auth),
+      'anthropic-version': API_VERSION,
+    },
     body: JSON.stringify(body),
     signal,
   })
