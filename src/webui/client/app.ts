@@ -317,12 +317,83 @@ export const CLIENT_APP_JS = `/**
     html = html.replace(listRe, '<li>$1</li>');
     const ulRe = new RegExp('(<li>[\\\\s\\\\S]*?<\\\\/li>)', 'g');
     html = html.replace(ulRe, '<ul>$1</ul>');
+    // GFM tables. Done with string ops, not a regex: this file is a template
+    // literal, so a pipe or backslash inside a /regex/ here would be mangled by
+    // the outer template before the browser ever sees it. Must run BEFORE the
+    // newline pass below, which would otherwise shatter a table into loose rows.
+    html = renderTables(html);
     // Newlines outside code blocks
     const parts = html.split(/(<div class="code-block-wrap">[\\s\\S]*?<\\/div>)/);
     for (let i = 0; i < parts.length; i += 2) {
       parts[i] = parts[i].split('\\n').join('<br/>').split('\\r').join('');
     }
     return parts.join('');
+  }
+
+  // A GitHub-flavored table (header row, a |---|---| separator, then body rows)
+  // into <table>. Cells keep whatever inline formatting ran before this (code,
+  // bold); their text was escaped at the top of formatMarkdown, so nothing here
+  // re-introduces an injection. A pipe inside a cell is the one unsupported case
+  // (GFM wants it backslash-escaped), accepted rather than parsed.
+  function renderTables(src) {
+    const NL = String.fromCharCode(10);
+    const lines = src.split(NL);
+    const cellsOf = (line) => {
+      let s = line.trim();
+      if (s.charAt(0) === '|') s = s.slice(1);
+      if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+      return s.split('|').map((c) => c.trim());
+    };
+    const isSeparator = (line) => {
+      const s = line.split(' ').join('').split(String.fromCharCode(9)).join('');
+      if (!s || s.indexOf('-') < 0) return false;
+      for (let k = 0; k < s.length; k++) {
+        const ch = s.charAt(k);
+        if (ch !== '|' && ch !== ':' && ch !== '-') return false;
+      }
+      return true;
+    };
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const header = lines[i];
+      const hasHeaderBar = header && header.indexOf('|') >= 0;
+      if (hasHeaderBar && i + 1 < lines.length && isSeparator(lines[i + 1])) {
+        const head = cellsOf(header);
+        const rows = [];
+        let j = i + 2;
+        while (j < lines.length && lines[j].indexOf('|') >= 0 && lines[j].trim() !== '') {
+          rows.push(cellsOf(lines[j]));
+          j++;
+        }
+        // Build the markup through a wrap() helper and fragment VARIABLES, never a
+        // "<tag>" + value literal. Those cell values are already escaped (the whole
+        // text passed through escapeHtml at the top of formatMarkdown), so escaping
+        // again here would double-encode; and the injection-sink test forbids a
+        // bare "<tag>" + value concat precisely because it cannot see that. Routing
+        // through wrap(), whose only literals are "<", ">" and "</" (no "<letter"),
+        // keeps the markup safe AND out of that forbidden shape.
+        const wrap = (tag, inner) => '<' + tag + '>' + inner + '</' + tag + '>';
+        let headCells = '';
+        for (let h = 0; h < head.length; h++) headCells += wrap('th', head[h]);
+        let bodyRows = '';
+        for (const r of rows) {
+          let tds = '';
+          for (let c = 0; c < head.length; c++) tds += wrap('td', r[c] || '');
+          bodyRows += wrap('tr', tds);
+        }
+        const TABLE_OPEN = '<table class="md-table"><thead>';
+        const THEAD_CLOSE = '</thead><tbody>';
+        const TABLE_CLOSE = '</tbody></table>';
+        const t = TABLE_OPEN + wrap('tr', headCells) + THEAD_CLOSE + bodyRows + TABLE_CLOSE;
+        out.push(t);
+        i = j;
+      } else {
+        out.push(header);
+        i++;
+      }
+    }
+    return out.join(NL);
   }
 
   function appendUserMessage(content, message) {
@@ -698,6 +769,42 @@ export const CLIENT_APP_JS = `/**
     scrollToBottom();
   }
 
+  // Render ONE tool card from a (call, result) pair — the same shape the live
+  // SSE path builds in handleToolUse + handleToolResult, so a reloaded transcript
+  // and a live one are identical. result is null for a call whose result has not
+  // arrived (an in-flight call, or an interrupted one restored from history);
+  // then the card reads as running rather than inventing a finished state.
+  function renderToolMessageCard(wrap, call, result, preferGeneric) {
+    const customRenderer = !preferGeneric && call.name ? sdk.tools.getRenderer(call.name) : null;
+    if (customRenderer) {
+      wrap.innerHTML = '';
+      customRenderer.render(wrap, call, result || undefined);
+      return;
+    }
+    // No registered renderer (grep, list_dir, web_fetch, …), OR a lossy history
+    // row we only have text for (preferGeneric): a generic terminal card, matching
+    // handleToolUse's fallback so the two paths cannot diverge.
+    const isError = Boolean(result && result.isError);
+    const tag = result
+      ? '<span class="tool-tag ' + (isError ? 'tag-error' : 'tag-success') + '">' + (isError ? 'Failed' : 'Success') + '</span>'
+      : '<span class="tool-tag tag-running">Running...</span>';
+    const bodySrc = result ? (result.display || result.content || '') : JSON.stringify(call.input || {}, null, 2);
+    const body = bodySrc
+      ? '<pre class="terminal-output ' + (isError ? 'output-error' : '') + '">' + escapeHtml(bodySrc) + '</pre>'
+      : '';
+    wrap.className = 'tool-card';
+    wrap.innerHTML = \`
+      <div class="terminal-header">
+        <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span class="material-symbols-outlined icon-sm">terminal</span>
+          <span>\${escapeHtml(call.name || 'tool')}</span>
+        </span>
+        \${tag}
+      </div>
+      \${body}
+    \`;
+  }
+
   function renderExistingMessages(msgs) {
     disposeAllMessageSlots();
     chatTranscript.innerHTML = '';
@@ -731,6 +838,18 @@ export const CLIENT_APP_JS = `/**
       return;
     }
 
+    // A tool call is persisted as TWO messages: a header (id = the call id,
+    // meta.toolInput, content "● name · arg") and a result (id = call id + "-r",
+    // meta.toolContent / diff). The live path pairs them into one card by id;
+    // rendering each as its own card here is what produced a duplicate — a card
+    // showing the raw "● read_file · path" header, then a second card with the
+    // real output. So pair them: the header creates the card, the result fills
+    // it in place, and an unmatched header stays as a running card.
+    const pendingToolWraps = new Map();
+    // Shape-2 (text transcript) pairing is positional, not by id — the previous
+    // "● name · arg" header waiting for its "⎿ …" result line.
+    let textPending = null;
+
     msgs.forEach(m => {
       if (m.content === '__banner__') return;
       if (m.role === 'user') {
@@ -743,31 +862,87 @@ export const CLIENT_APP_JS = `/**
         }
       } else if (m.role === 'tool') {
         const toolName = m.meta?.toolName;
-        // Do not display todo list in the chat transcript!
-        if (toolName === 'todo_write' || (typeof m.content === 'string' && m.content.startsWith('● todo_write'))) {
+        const content = typeof m.content === 'string' ? m.content : '';
+
+        // Todo lists live in the floating dock, never the transcript — either shape.
+        if (toolName === 'todo_write' || content.startsWith('● todo_write') || content.startsWith('⎿ todo_write')) {
           return;
         }
 
-        const container = ensureAssistantCard();
-        const div = document.createElement('div');
-        const customRenderer = toolName ? sdk.tools.getRenderer(toolName) : null;
-        if (customRenderer) {
-          customRenderer.render(
-            div,
-            { id: m.id, name: toolName, input: m.meta?.toolInput || {} },
-            {
+        // Shape 1 — WebUI AgentBridge persistence: meta.toolName + id/"id-r"
+        // pairing, routed through the real per-tool renderers (bash terminal,
+        // read card, diff viewer).
+        if (toolName) {
+          const isResult = typeof m.id === 'string' && m.id.endsWith('-r');
+          if (isResult) {
+            const result = {
               id: m.id,
               name: toolName,
               content: m.meta?.toolContent || m.content,
               display: m.meta?.toolDisplay,
               diff: m.meta?.diff,
               isError: Boolean(m.meta?.error),
+            };
+            const pending = pendingToolWraps.get(m.id.slice(0, -2));
+            if (pending) {
+              renderToolMessageCard(pending.wrap, pending.call, result);
+              pendingToolWraps.delete(m.id.slice(0, -2));
+            } else {
+              const container = ensureAssistantCard();
+              const div = document.createElement('div');
+              renderToolMessageCard(div, { id: result.id, name: toolName, input: {} }, result);
+              container.appendChild(div);
             }
-          );
-        } else {
-          div.className = 'tool-card';
-          div.innerHTML = \`<div class="terminal-output">\${escapeHtml(m.content)}</div>\`;
+            return;
+          }
+          const container = ensureAssistantCard();
+          const div = document.createElement('div');
+          const call = { id: m.id, name: toolName, input: m.meta?.toolInput || {} };
+          renderToolMessageCard(div, call, null);
+          container.appendChild(div);
+          pendingToolWraps.set(m.id, { wrap: div, call });
+          return;
         }
+
+        // Shape 2 — TUI/launcher persistence: no meta, raw glyph transcript text.
+        // "● name · arg" is a header, "⎿ …" its result, paired positionally (ids
+        // are sequential, not id/"id-r"). Parsed into a generic card so a reloaded
+        // TUI session reads as cards, not the ●/⎿ lines the user reported.
+        // preferGeneric: the structured input is gone, so the per-tool renderers
+        // (which read call.input) would draw an empty card.
+        if (content.charAt(0) === '●') {
+          const rest = content.slice(1).trim();
+          const dotIdx = rest.indexOf('·');
+          const name = (dotIdx >= 0 ? rest.slice(0, dotIdx) : rest).trim();
+          const arg = dotIdx >= 0 ? rest.slice(dotIdx + 1).trim() : '';
+          const container = ensureAssistantCard();
+          const div = document.createElement('div');
+          const call = { name: name, input: {} };
+          renderToolMessageCard(div, call, arg ? { content: arg } : null, true);
+          container.appendChild(div);
+          textPending = { wrap: div, call: call, arg: arg };
+          return;
+        }
+        if (content.charAt(0) === '⎿') {
+          const body = content.slice(1).trim();
+          if (textPending) {
+            renderToolMessageCard(textPending.wrap, textPending.call, { content: body || textPending.arg }, true);
+            textPending = null;
+          } else {
+            const container = ensureAssistantCard();
+            const div = document.createElement('div');
+            div.className = 'tool-card';
+            div.innerHTML = \`<div class="terminal-output">\${escapeHtml(body)}</div>\`;
+            container.appendChild(div);
+          }
+          return;
+        }
+
+        // Neither shape — a plain tool message (e.g. a demo fixture). Keep it legible.
+        const container = ensureAssistantCard();
+        const div = document.createElement('div');
+        div.className = 'tool-card';
+        div.innerHTML = \`<div class="terminal-output">\${escapeHtml(content)}</div>\`;
         container.appendChild(div);
       } else if (m.role === 'system' && m.meta?.error) {
         const errRow = document.createElement('div');
@@ -797,6 +972,26 @@ export const CLIENT_APP_JS = `/**
   }
 
   // --- Send / Abort Turn ---
+  // Is this command terminal-only? Read from the fetched /api/commands metadata
+  // (paletteCommands, populated at boot). A tuiOnly command — /login, /vim,
+  // /editor — has no browser action, so running it just prints "terminal only";
+  // the palette turns it into "copy the CLI line" instead, and the composer must
+  // do the same or typing /login looks broken (it used to hit the model and get
+  // "Not logged in to MeowArch API").
+  function commandIsTuiOnly(name) {
+    const c = paletteCommands.find((x) => x.name === name || (x.aliases || []).indexOf(name) >= 0);
+    return !!(c && c.tuiOnly);
+  }
+  async function copyCliForCommand(name) {
+    const cli = 'meowcode ' + name;
+    try {
+      await navigator.clipboard.writeText(cli);
+      sdk.ui.showToast({ message: sdk.i18n.t('palette.copied', { cmd: cli }), type: 'info' });
+    } catch (e) {
+      sdk.ui.showToast({ message: cli, type: 'info' });
+    }
+  }
+
   async function handleSend() {
     const text = promptInput.value.trim();
     if (!text) return;
@@ -804,19 +999,29 @@ export const CLIENT_APP_JS = `/**
     promptInput.value = '';
     autoResizeInput();
 
+    // A slash command is NOT a prompt — route it to the command runner, never to
+    // the model. Hoisted ABOVE the running/idle split: the idle path used to fall
+    // straight through to sendMessage(), so typing "/login" while idle posted it
+    // to /api/turn and the provider answered "⚠ Not logged in to MeowArch API…"
+    // instead of the command running. (The type-ahead branch already did this; the
+    // idle branch did not.) Echo the typed line first, like the TUI does.
+    if (isCommand(text)) {
+      const name = text.slice(1).split(/\s+/)[0];
+      // Terminal-only command: copy the CLI line (same as the palette), don't run
+      // it as a prompt and don't fake a transcript row.
+      if (commandIsTuiOnly(name)) {
+        await copyCliForCommand(name);
+        return;
+      }
+      appendUserMessage(text);
+      await runSlashCommand(name, text.slice(1 + name.length).trim());
+      return;
+    }
+
     // Type-ahead: a turn is already streaming, so queue the line instead of
     // dropping it. The agent loop drains it after the next tool batch (takePending),
     // which is exactly how the TUI behaves while it streams.
     if (isRunning) {
-      // A "/" line is not prose, so it cannot ride the turn as type-ahead: the
-      // server refuses to feed it to the model and answers with what the command
-      // printed, so route it through the palette's own runner here — which also
-      // gets its confirmation dialog, its argument prompt, and the right toast.
-      if (isCommand(text)) {
-        const name = text.slice(1).split(/\s+/)[0];
-        await runSlashCommand(name, text.slice(1 + name.length).trim());
-        return;
-      }
       appendUserMessage(text);
       try {
         await sdk.api.queueTurnText(text);
@@ -1730,14 +1935,8 @@ export const CLIENT_APP_JS = `/**
       return;
     }
     if (cmd.tuiOnly) {
-      const cli = 'meowcode ' + cmd.name;
-      try {
-        await navigator.clipboard.writeText(cli);
-        closeCommandPalette();
-        sdk.ui.showToast({ message: sdk.i18n.t('palette.copied', { cmd: cli }), type: 'info' });
-      } catch (e) {
-        sdk.ui.showToast({ message: cli, type: 'info' });
-      }
+      closeCommandPalette();
+      await copyCliForCommand(cmd.name);
       return;
     }
     closeCommandPalette();

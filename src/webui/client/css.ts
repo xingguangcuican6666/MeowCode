@@ -2227,6 +2227,36 @@ md-assist-chip, md-filter-chip {
 .assistant-live-text ul { margin-left: 20px; margin-bottom: 10px; list-style: disc; }
 .assistant-live-text li { margin-bottom: 4px; }
 
+/* Markdown tables (GFM). formatMarkdown emits .md-table; without these it was a
+   wall of raw " | a | b | " text the newline pass turned into loose <br/> rows. */
+.md-table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+  width: auto;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--md-sys-color-outline-variant);
+  padding: 6px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  font-weight: 600;
+}
+.md-table tr:nth-child(even) td {
+  background: var(--md-sys-color-surface-container);
+}
+.md-table code {
+  white-space: nowrap;
+}
+
 /* Thinking Card Toggle Icon */
 .thinking-header {
   justify-content: space-between;

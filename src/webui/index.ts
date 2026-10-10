@@ -1,4 +1,4 @@
-export { startWebUI, createWebUIServer } from './server'
+export { startWebUI, createWebUIServer, isWebUIActive } from './server'
 export { createWebUISecurity, AUTH_COOKIE } from './security'
 export type { WebUISecurity, WebUISecurityOptions } from './security'
 export { AgentBridge } from './agent-bridge'

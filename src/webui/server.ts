@@ -42,7 +42,21 @@ interface WebUIServerInternals extends WebUIServerInstance {
   listen: (p: number, onListening?: () => void) => http.Server
 }
 
+// True once this PROCESS has created a WebUI server. The `/web` command consults
+// it (via isWebUIActive) and refuses to start another: without that guard the
+// command palette's own probe — which executes every command to classify it (see
+// renderCommandIndex) — ran `/web`, which called startWebUI({ openBrowser: true })
+// for real, bound the next port, opened a browser tab, and the tab it opened then
+// hit /api/commands and probed `/web` again. That is the runaway the user saw: a
+// single process walking 4040→4041→4042→… forever, a tab per step. A WebUI never
+// starts a second WebUI inside itself, so this is the honest invariant to assert.
+let webuiProcessActive = false
+export function isWebUIActive(): boolean {
+  return webuiProcessActive
+}
+
 export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstance {
+  webuiProcessActive = true
   const cwd = options.cwd || process.cwd()
   const config = options.config || loadConfig()
   const port = options.port || 4040
@@ -1468,13 +1482,36 @@ function launchBrowser(url: string): void {
   }
 }
 
+// Browser-restricted ports: Chrome/Edge refuse to NAVIGATE to these
+// (ERR_UNSAFE_PORT) even though the OS binds them without complaint. The port
+// walk below skips them, so it never hands the browser a URL it will reject —
+// the user hit exactly this when a walk from 4040 landed on 4045 (lockd) and the
+// tab died with ERR_UNSAFE_PORT. This is Chromium's kRestrictedPorts list.
+const UNSAFE_PORTS = new Set<number>([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723,
+  2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669,
+  6697, 10080,
+])
+const skipUnsafePort = (p: number): number => {
+  let n = p
+  while (UNSAFE_PORTS.has(n)) n++
+  return n
+}
+
+// Exported for the port-walk test — the skip is the thing that keeps the browser
+// from being handed an ERR_UNSAFE_PORT URL, and it must not quietly regress.
+export const _skipUnsafePortForTest = skipUnsafePort
+
 export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServerInstance> {
   const initialPort = options.port || 4040
   const host = options.host || '127.0.0.1'
   const instance = createWebUIServer(options)
 
   return new Promise((resolve, reject) => {
-    let currentPort = initialPort
+    let currentPort = skipUnsafePort(initialPort)
     // Every bind goes through the instance's own `listen`, which is what records
     // the port it landed on. Calling server.listen directly on a retry left
     // effectivePort naming the port that was ALREADY taken — so instance.url and
@@ -1485,15 +1522,16 @@ export async function startWebUI(options: WebUIOptions = {}): Promise<WebUIServe
 
     server.on('error', (err: any) => {
       if (err.code === 'EADDRINUSE') {
-        currentPort++
-        if (currentPort > initialPort + 10) {
+        const busy = currentPort
+        currentPort = skipUnsafePort(currentPort + 1)
+        if (currentPort > initialPort + 12) {
           reject(new Error(`Unable to bind WebUI server; ports ${initialPort}-${currentPort} are in use.`))
         } else {
           // Say what happened: the port the user asked for was not the port they
           // got, and without this the walk-up is invisible — they wonder why the
           // printed URL is not the one they configured.
           process.stdout.write(
-            `⚠  Port ${currentPort - 1} is in use, starting WebUI on ${currentPort} instead.\n`,
+            `⚠  Port ${busy} is in use, starting WebUI on ${currentPort} instead.\n`,
           )
           listen.call(instance, currentPort)
         }

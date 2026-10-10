@@ -1483,9 +1483,18 @@ const webCmd: SlashCommand = {
   async run(ctx) {
     const rawPort = ctx.args.trim()
     const port = rawPort ? parseInt(rawPort, 10) : 4040
+    const { startWebUI, isWebUIActive } = await import('../webui')
+    // A WebUI never starts a WebUI. This command runs in the TUI, but the WebUI's
+    // command palette probes every command by executing it (renderCommandIndex),
+    // and the browser palette can invoke it too — either path, inside a running
+    // WebUI process, would spawn a nested server and open a tab, which then probes
+    // `/web` again: the 4040→4041→4042→… runaway. Refuse rather than recurse.
+    if (isWebUIActive()) {
+      ctx.print(t('cmd.webAlready'), 'system')
+      return
+    }
     ctx.print(t('cmd.webStarting', { url: `http://127.0.0.1:${port}` }), 'system')
     try {
-      const { startWebUI } = await import('../webui')
       // cwd: /web runs inside a live session, so hand the WebUI the working
       // directory the TUI is using rather than the process's default.
       const instance = await startWebUI({ config: ctx.config, port, openBrowser: true, cwd: process.cwd() })

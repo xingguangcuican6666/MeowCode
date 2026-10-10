@@ -534,6 +534,37 @@ async function main(): Promise<void> {
     process.stdout.write(`• Browser SDK: window.MeowSDK\n`)
     process.stdout.write(`• Built-in showcase plugins: Workspace Files, Tools Inspector, Prompt Templates, Metrics Monitor\n`)
     process.stdout.write(`Press Ctrl+C to terminate.\n\n`)
+
+    // Tear the server down cleanly, so a dev run never leaves an orphan holding
+    // the port. The user hit the fallout of that: each `bun run dev -- webui`
+    // whose Ctrl+C did not reach this child left a server bound, the next run
+    // walked to the next port and opened ANOTHER browser tab, cascading
+    // 4040→4041→…→4045 until the browser refused the unsafe port. Two guards,
+    // because under bun → tsx → node the signal does not always arrive:
+    let closingWeb = false
+    const shutdownWeb = async (): Promise<void> => {
+      if (closingWeb) return
+      closingWeb = true
+      // A hung close (e.g. a slow SSE drain) must not strand the process.
+      const hard = setTimeout(() => process.exit(0), 1500)
+      hard.unref()
+      try { await instance.close() } catch { /* already down */ }
+      process.exit(0)
+    }
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+      process.on(sig, () => { void shutdownWeb() })
+    }
+    // If the signal never comes, the server is reparented to init (ppid → 1) the
+    // moment its launcher dies — that is precisely an orphaned dev server, so take
+    // it down rather than leak the port. Skipped when already parented to init
+    // (ppid === 1), i.e. a deliberately daemonized launch, which exits on SIGTERM.
+    if (process.ppid > 1) {
+      const parentPid = process.ppid
+      const guard = setInterval(() => {
+        if (process.ppid !== parentPid) void shutdownWeb()
+      }, 1500)
+      guard.unref()
+    }
     return
   }
 

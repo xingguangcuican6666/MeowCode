@@ -11,7 +11,7 @@ const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'meow-webui-start-'))
 process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
-const { startWebUI } = await import('./server')
+const { startWebUI, _skipUnsafePortForTest } = await import('./server')
 const { loadWebUIToken } = await import('./token-store')
 import type { WebUIServerInstance } from './types'
 
@@ -106,5 +106,15 @@ describe('startWebUI: one announcement, one port, one token', () => {
     const inst = await startWebUI({ port: BASE_PORT + 5, host: '127.0.0.1', openBrowser: false, auth: false })
     servers.push(inst)
     expect(loadWebUIToken()).toBe(before)
+  })
+
+  it('skips browser-unsafe ports when walking, so the opened URL never ERR_UNSAFE_PORTs', () => {
+    // The user's walk ran 4040→…→4045 and the tab died on ERR_UNSAFE_PORT: 4045
+    // (lockd) is on Chromium's restricted list, which the OS binds anyway. The
+    // walk must step over it rather than hand the browser a URL it refuses.
+    expect(_skipUnsafePortForTest(4044)).toBe(4044) // a free, allowed port is left alone
+    expect(_skipUnsafePortForTest(4045)).toBe(4046) // 4045 is restricted → skipped
+    expect(_skipUnsafePortForTest(6000)).toBe(6001) // X11, also restricted
+    expect(_skipUnsafePortForTest(6665)).toBe(6670) // the 6665–6669 IRC block, skipped as one
   })
 })

@@ -24,7 +24,7 @@ vi.mock('node:os', async (importOriginal) => {
   return mocked
 })
 
-import { createWebUIServer } from './server'
+import { createWebUIServer, isWebUIActive } from './server'
 import { SLOT_IDS } from './types'
 import type { WebUIPlugin, WebUIServerInstance } from './types'
 import { SETTINGS, settingGroups } from '../lib/settings'
@@ -68,7 +68,13 @@ function liftFunction(source: string, name: string): string {
 }
 
 // escapeHtml is formatMarkdown's only defence, so the pair has to travel together.
-const markdownBody = liftFunction(CLIENT_APP_JS, 'escapeHtml') + '\n' + liftFunction(CLIENT_APP_JS, 'formatMarkdown')
+// renderTables is a sibling formatMarkdown now calls, so it travels too.
+const markdownBody =
+  liftFunction(CLIENT_APP_JS, 'escapeHtml') +
+  '\n' +
+  liftFunction(CLIENT_APP_JS, 'renderTables') +
+  '\n' +
+  liftFunction(CLIENT_APP_JS, 'formatMarkdown')
 
 describe('MeowCode Built-in WebUI & Extension SDK', () => {
   // The sentence the server substitutes for a side-panel switch, derived from the
@@ -812,6 +818,78 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(run('```\nx\n```')).toContain('copy-code-btn')
   })
 
+  it('renders a GFM table as a <table>, not raw pipe text', () => {
+    // The user saw "| 方式 | 命令 |" rendered verbatim because formatMarkdown had no
+    // table support and the newline pass turned each row into a loose <br/> line.
+    const run = new Function(markdownBody + '\nreturn formatMarkdown;')() as (t: string) => string
+    const md = ['| Method | Command |', '|---|---|', '| read | `read_file` |', '| cli | meowcode -c |'].join('\n')
+    const out = run(md)
+    expect(out).toContain('<table class="md-table">')
+    expect(out).toContain('<th>Method</th>')
+    expect(out).toContain('<th>Command</th>')
+    expect(out).toContain('<td>read</td>')
+    // Inline formatting inside a cell survives (the backtick became a code span).
+    expect(out).toContain('<code class="inline-code">read_file</code>')
+    // The separator row is consumed, never emitted as a body row.
+    expect(out).not.toContain('<td>---</td>')
+    // A cell value is still escaped — no raw-HTML injection through a table cell.
+    const evil = ['| a | b |', '|---|---|', '| <img src=x> | ok |'].join('\n')
+    expect(run(evil)).not.toContain('<img')
+    // A line that merely contains a pipe but has no separator stays prose.
+    expect(run('a | b not a table')).not.toContain('<table')
+  })
+
+  it('renders a reloaded tool call as one card, never the raw TUI header line', () => {
+    // A tool call is persisted as two messages: a header ("● name · arg", carrying
+    // the input) and a result ("<id>-r", carrying the output). renderExistingMessages
+    // used to render each as its own card, so a reloaded transcript showed the raw
+    // "● read_file · path" header as a card of its own beside the real output — the
+    // "looks copied from the TUI" bug. The two guards below: the pairing wiring is
+    // present, and the shared card builder never emits that header as body text.
+    expect(CLIENT_APP_JS).toContain('pendingToolWraps')
+    expect(CLIENT_APP_JS).toMatch(/endsWith\(['"]-r['"]\)/)
+
+    const toolCardBody =
+      liftFunction(CLIENT_APP_JS, 'escapeHtml') + '\n' + liftFunction(CLIENT_APP_JS, 'renderToolMessageCard')
+    const build = (getRenderer: (name: string) => unknown) =>
+      new Function('sdk', toolCardBody + '\nreturn renderToolMessageCard;')({ tools: { getRenderer } }) as (
+        wrap: { className: string; innerHTML: string },
+        call: { id?: string; name: string; input?: unknown },
+        result: unknown,
+      ) => void
+
+    // No registered renderer (list_dir): the generic card shows the OUTPUT, tagged
+    // success, with no "●" header leaking into the body.
+    const generic = build(() => null)
+    const w1 = { className: '', innerHTML: '' }
+    generic(w1, { name: 'list_dir', input: { path: 'src' } }, { content: 'commands/\nlib/', isError: false })
+    expect(w1.innerHTML).toContain('list_dir')
+    expect(w1.innerHTML).toContain('commands/')
+    expect(w1.innerHTML).not.toContain('●')
+    expect(w1.innerHTML).not.toContain('tag-running')
+
+    // A call with no result yet reads as running and shows the input, not a fake
+    // finished state — the interrupted/in-flight case restored from history.
+    const w2 = { className: '', innerHTML: '' }
+    generic(w2, { name: 'bash', input: { command: 'echo hi' } }, null)
+    expect(w2.innerHTML).toContain('tag-running')
+    expect(w2.innerHTML).toContain('echo hi')
+
+    // A registered renderer is handed the PAIRED result, so the reloaded card is
+    // the finished one, not a call-only placeholder.
+    let sawResult: unknown = 'unset'
+    const custom = build(() => ({
+      render: (wrap: { innerHTML: string }, _call: unknown, result: unknown) => {
+        sawResult = result
+        wrap.innerHTML = '<div class="read-file-content">PAIRED</div>'
+      },
+    }))
+    const w3 = { className: '', innerHTML: '' }
+    custom(w3, { name: 'read_file', input: { path: 'package.json' } }, { content: 'FILEDATA', isError: false })
+    expect(w3.innerHTML).toContain('PAIRED')
+    expect(sawResult).toMatchObject({ content: 'FILEDATA' })
+  })
+
   it('serves the whole command registry to the palette, in the reader language', async () => {
     const res = await get('/api/commands')
     expect(res.status).toBe(200)
@@ -861,6 +939,31 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     const help = messages['cmd.helpDesc'] as { zh: string; en: string }
     expect(seen.zh.help).toBe(help.zh)
     expect(seen.en.help).toBe(help.en)
+  })
+
+  it('refuses to start a nested WebUI, so the palette probe cannot run away', async () => {
+    // The palette index is built by EXECUTING every command against a probe
+    // context (renderCommandIndex). `/web` used to ignore that context and call
+    // startWebUI({ openBrowser: true }) for real: it bound the next port, opened a
+    // browser tab, and the tab it opened hit /api/commands and probed `/web`
+    // again — a single process walking 4040→4041→4042→… forever, a tab per step.
+    // The guard: a process that already has a WebUI refuses to start another.
+    expect(isWebUIActive()).toBe(true)
+
+    const res = await post('/api/commands/run', { command: '/web' })
+    expect(res.status).toBe(200)
+    const data: any = await res.json()
+    const text = (data.messages ?? []).map((m: any) => m.content).join('\n')
+
+    // It answered, and it answered with the refusal — never the spawn path. The
+    // two spawn prints are the tell: webStarting ("Starting…/正在启动") and
+    // webReady (the 🐾 line with a fresh URL). Neither may appear.
+    expect(text.length).toBeGreaterThan(0)
+    expect(text).not.toContain('🐾')
+    expect(text.toLowerCase()).not.toContain('starting built-in webui')
+    expect(text).not.toContain('正在启动内置 WebUI')
+    const already = messages['cmd.webAlready'] as { zh: string; en: string }
+    expect(text === already.zh || text === already.en).toBe(true)
   })
 
   it('marks the commands whose bare form only switches a panel as needing an argument', async () => {
