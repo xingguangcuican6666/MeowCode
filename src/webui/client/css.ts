@@ -1282,9 +1282,47 @@ html, body {
   font-weight: 700;
 }
 
+/* The in-composer Queue/Stop buttons. They carry m3-btn (plus m3-btn-danger),
+   but that base class had NO rule — only the color modifiers existed — so they
+   rendered as raw browser buttons (sharp corners, default padding) next to the
+   pill-shaped Send. This is the missing base: a pill matching .m3-send-btn. */
+.m3-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--md-shape-full);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--font-family-display);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--md-motion-duration-short) var(--md-motion-easing-emphasized);
+}
+.m3-btn:hover {
+  background: var(--md-sys-color-surface-container-highest);
+  border-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-surface);
+  transform: translateY(-1px);
+}
+.m3-btn:active { transform: scale(0.97); }
+.m3-btn .material-symbols-outlined { font-size: 16px; }
+
 .m3-btn-danger {
   background: var(--md-sys-color-error);
   color: var(--md-sys-color-on-error);
+  border-color: transparent;
+}
+.m3-btn-danger:hover {
+  background: var(--md-sys-color-error);
+  color: var(--md-sys-color-on-error);
+  border-color: transparent;
+  filter: brightness(1.1);
 }
 
 /* Quick pills toolbar */

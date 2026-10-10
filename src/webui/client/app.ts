@@ -858,6 +858,17 @@ export const CLIENT_APP_JS = `/**
       if (m.content === '__banner__') return;
       if (m.role === 'user') {
         appendUserMessage(m.content, m);
+        // Close the previous turn's assistant card so THIS turn's reply starts a
+        // fresh one. Without this, ensureAssistantCard() keeps returning the first
+        // turn's card, and every later turn's thinking/text get appended into it —
+        // so a reloaded multi-turn chat showed only the first reply, the rest
+        // hidden inside that first card above the later user bubbles. That is the
+        // "完成时没了 / 刷新叠到一起" the user hit. The live path already resets
+        // these in handleSend; the re-render path must match it, per user message.
+        activeTurnAssistantEl = null;
+        activeTurnAssistantMessage = null;
+        activeTurnThinkingCard = null;
+        activeTurnThinkingBody = null;
       } else if (m.role === 'assistant') {
         if (m.meta?.thinking) {
           appendThinking(m.content);

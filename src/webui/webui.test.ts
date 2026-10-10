@@ -839,6 +839,20 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(run('a | b not a table')).not.toContain('<table')
   })
 
+  it('starts a fresh assistant card for each turn when a transcript is re-rendered', () => {
+    // renderExistingMessages must null activeTurnAssistantEl when it renders a user
+    // message. Without it ensureAssistantCard() keeps returning the first turn's
+    // card, so every later turn's thinking/text is appended INTO that first card —
+    // a reloaded multi-turn chat then shows only the first reply, the rest hidden
+    // inside it above the later user bubbles (the "完成时没了 / 刷新叠到一起" bug).
+    // The live path resets these in handleSend; this guards the re-render path.
+    const i = CLIENT_APP_JS.indexOf('appendUserMessage(m.content, m)')
+    expect(i).toBeGreaterThan(-1)
+    const afterUserBranch = CLIENT_APP_JS.slice(i, i + 900)
+    expect(afterUserBranch).toContain('activeTurnAssistantEl = null')
+    expect(afterUserBranch).toContain('activeTurnThinkingCard = null')
+  })
+
   it('renders a reloaded tool call as one card, never the raw TUI header line', () => {
     // A tool call is persisted as two messages: a header ("● name · arg", carrying
     // the input) and a result ("<id>-r", carrying the output). renderExistingMessages
