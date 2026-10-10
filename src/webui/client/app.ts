@@ -1011,19 +1011,23 @@ export const CLIENT_APP_JS = `/**
     // idle branch did not.) Echo the typed line first, like the TUI does.
     if (isCommand(text)) {
       const name = text.slice(1).split(/\s+/)[0];
+      const rest = text.slice(1 + name.length).trim();
       // /login and /logout are handled natively in the browser: the server command
       // is TUI-only (it drives a terminal overlay), but the WebUI has its own login
       // dialog, so open that instead of copying a CLI line.
       if (name === 'login') { void openLoginModal(); return; }
       if (name === 'logout') { void doWebLogout(); return; }
-      // Terminal-only command: copy the CLI line (same as the palette), don't run
-      // it as a prompt and don't fake a transcript row.
-      if (commandIsTuiOnly(name)) {
+      // Copy the CLI line ONLY for a terminal-only command the browser has no
+      // handler for. A command with an argument picker (/model, /theme, /provider,
+      // /effort, /vim …) is "tuiOnly" server-side yet fully usable here through its
+      // picker, so gating on argSpecFor(name).kind === 'bare' keeps those working —
+      // the earlier unconditional copy is what made /model do nothing.
+      if (!rest && commandIsTuiOnly(name) && argSpecFor(name).kind === 'bare') {
         await copyCliForCommand(name);
         return;
       }
       appendUserMessage(text);
-      await runSlashCommand(name, text.slice(1 + name.length).trim());
+      await runSlashCommand(name, rest);
       return;
     }
 
@@ -1660,7 +1664,7 @@ export const CLIENT_APP_JS = `/**
     { name: 'files', icon: 'folder', title: 'Browse Files', desc: 'Switch to the workspace file explorer', local: true, run: () => switchPanel('files') },
     { name: 'tools', icon: 'construction', title: 'Inspect Tools', desc: 'Switch to the agent tool inspector', local: true, run: () => switchPanel('tools') },
     { name: 'ws', icon: 'developer_board', title: 'Workspace Info', desc: 'Repository, branch, provider and model', local: true, run: () => openWorkspaceInfo() },
-    { name: 'model', icon: 'psychology', title: 'Switch Model', desc: 'Pick the model from a list', local: true, run: () => askEnum(sdk.i18n.t('modal.model.title'), MODELS.map((m) => ({ value: m.id, label: m.name, description: m.desc })), { current: appConfig.model }).then((id) => { if (id) sdk.api.updateConfig({ model: id }); }) },
+    { name: 'model', icon: 'psychology', title: 'Switch Model', desc: 'Pick the model from a list', local: true, run: () => openModelSelectorModal() },
   ];
 
   let paletteCommands = [];
@@ -2030,7 +2034,7 @@ export const CLIENT_APP_JS = `/**
   }
 
   function modelChoices() {
-    const list = MODELS.map((m) => ({ value: m.id, label: m.name, description: m.desc }));
+    const list = modelList().map((m) => ({ value: m.id, label: m.name, description: m.desc }));
     return list.length ? list : [{ value: appConfig.model, label: appConfig.model }];
   }
 
@@ -2086,6 +2090,10 @@ export const CLIENT_APP_JS = `/**
   }
 
   async function runSlashCommand(name, args) {
+    // Bare /model opens the model picker modal (same UI as the header chip and the
+    // palette), which paints the cached/shortlist instantly and refreshes the live
+    // catalog in the background — never blocking on the remote /v1/models call.
+    if (name === 'model' && !args) { void openModelSelectorModal(); return; }
     const spec = argSpecFor(name);
     let finalArgs = args || '';
 
@@ -2204,9 +2212,44 @@ export const CLIENT_APP_JS = `/**
     { id: 'mock-offline', name: 'Offline Simulated Engine', desc: 'Instant local responses & tool simulations (no API key needed)', badge: 'Offline' },
   ];
 
-  function openModelSelectorModal() {
+  // The REAL callable models from GET /api/models (same source as the TUI), cached
+  // here. null until fetched or when the fetch is empty/failed, in which case the
+  // picker falls back to the MODELS shortlist above rather than showing nothing.
+  let modelCatalog = null;
+  async function refreshModelCatalog() {
+    try {
+      const cat = await sdk.api.listModels();
+      modelCatalog = cat && Array.isArray(cat.models) && cat.models.length ? cat : null;
+    } catch (_) {
+      modelCatalog = null;
+    }
+    return modelCatalog;
+  }
+  // Normalized [{id,name,desc,badge}] — the live catalog when we have one (reusing
+  // the shortlist's prettier name/desc for ids it recognizes), else the shortlist.
+  function modelList() {
+    if (modelCatalog && modelCatalog.models && modelCatalog.models.length) {
+      const known = {};
+      MODELS.forEach((m) => { known[m.id] = m; });
+      const groupOf = {};
+      if (modelCatalog.byGroup) {
+        for (const g of Object.keys(modelCatalog.byGroup)) {
+          for (const id of (modelCatalog.byGroup[g] || [])) if (!groupOf[id]) groupOf[id] = g;
+        }
+      }
+      return modelCatalog.models.map((id) => {
+        const k = known[id];
+        return { id, name: (k && k.name) || id, desc: (k && k.desc) || '', badge: groupOf[id] || (k && k.badge) || '' };
+      });
+    }
+    return MODELS;
+  }
+
+  async function openModelSelectorModal() {
     if (!modelSelectorModal) return;
     modelSelectorModal.style.display = 'flex';
+    renderModelSelectorList(); // paint immediately (cached/fallback), then refresh
+    await refreshModelCatalog();
     renderModelSelectorList();
   }
 
@@ -2215,18 +2258,18 @@ export const CLIENT_APP_JS = `/**
     modelSelectorList.innerHTML = '';
     const currentModel = appConfig.model || 'claude-opus-4-8';
 
-    MODELS.forEach(m => {
+    modelList().forEach(m => {
       const card = document.createElement('div');
       const isActive = m.id === currentModel;
       card.className = 'model-option-card ' + (isActive ? 'active' : '');
       card.innerHTML = \`
         <div>
           <div class="model-card-title">
-            <span>\${isActive ? '✓ ' : ''}\${m.name}</span>
+            <span>\${isActive ? '✓ ' : ''}\${escapeHtml(m.name)}</span>
           </div>
-          <div class="model-card-desc">\${m.desc}</div>
+          <div class="model-card-desc">\${escapeHtml(m.desc)}</div>
         </div>
-        <span class="model-card-badge">\${m.badge}</span>
+        <span class="model-card-badge">\${escapeHtml(m.badge)}</span>
       \`;
       card.addEventListener('click', async () => {
         try {
@@ -3203,6 +3246,9 @@ export const CLIENT_APP_JS = `/**
         const cfg = JSON.parse(e.data);
         if (cfg && typeof cfg === 'object') applyRemoteConfig(cfg);
       } catch (_) {}
+      // A login or provider change alters which models are callable — drop the
+      // cached catalog so the next /model fetches fresh.
+      modelCatalog = null;
       sdk.emit('config:update');
     });
 

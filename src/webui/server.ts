@@ -33,8 +33,9 @@ import { MATERIAL_WEB_JS } from './client/material-web'
 import { workspaceFilesPlugin } from './plugins/workspace-files'
 import { stableWebUIToken } from './token-store'
 import { login as newapiLogin, submit2FA, fetchRelayKey, normalizeBase, resolveNewapiBase, logout as newapiLogout } from '../lib/newapi'
-import { loginWithOAuth, resolveOAuthClientId, revokeOAuth } from '../lib/oauth'
+import { loginWithOAuth, resolveOAuthClientId, revokeOAuth, resolveRelayToken } from '../lib/oauth'
 import { saveCredentials, loadCredentials, clearCredentials, keySource, loadApiKey, saveApiKey } from '../lib/credentials'
+import { fetchModelCatalog } from '../lib/models'
 import { toolsInspectorPlugin } from './plugins/tools-inspector'
 import { promptTemplatesPlugin } from './plugins/prompt-templates'
 import { metricsMonitorPlugin } from './plugins/metrics-monitor'
@@ -1362,6 +1363,21 @@ export function createWebUIServer(options: WebUIOptions = {}): WebUIServerInstan
         if (keptKey) saveApiKey(keptKey)
         broadcastSSE('config:update', bridge.getConfig())
         sendJson(res, 200, { ok: true })
+        return
+      }
+
+      // API: the REAL callable model list, so /model is not a hardcoded stub. Same
+      // source the TUI's model picker uses — GET /v1/models through the resolved
+      // relay token (an sk- key, or an OAuth at_ token transparently refreshed),
+      // against the credential's base URL. On no login / mock / a network error it
+      // returns { models: [], error } and the client falls back to its shortlist.
+      if (req.method === 'GET' && pathname === '/api/models') {
+        const cur = loadCredentials()
+        const base = cur?.baseUrl || resolveNewapiBase()
+        let token: string | undefined
+        try { token = await resolveRelayToken() } catch { token = undefined }
+        const catalog = await fetchModelCatalog(base, token)
+        sendJson(res, 200, catalog)
         return
       }
 

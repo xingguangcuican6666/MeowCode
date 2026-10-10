@@ -765,6 +765,9 @@ export const CLIENT_SDK_JS = `/**
     async logout() {
       return await apiFetch('/api/logout', { method: 'POST' });
     },
+    async listModels() {
+      return await apiFetch('/api/models');
+    },
     async listSettings() {
       return await apiFetch('/api/settings');
     },
