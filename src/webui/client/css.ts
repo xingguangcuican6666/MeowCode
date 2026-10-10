@@ -1199,6 +1199,15 @@ html, body {
 .chat-input::placeholder {
   color: var(--md-sys-color-on-surface-variant);
 }
+/* The dock card already signals focus with its :focus-within border + glow. The
+   GLOBAL :focus-visible outline (further down this sheet) would otherwise draw a
+   SECOND rounded frame inside the card the moment the textarea takes focus — the
+   "框中框 / box-in-a-box" the user saw. Suppress it on the seamless input; the
+   card is the focus indicator. */
+.chat-input:focus,
+.chat-input:focus-visible {
+  outline: none;
+}
 
 .input-bottom-row {
   display: flex;
@@ -1674,9 +1683,13 @@ html, body {
   align-items: stretch;
   min-height: 0;
   height: min(440px, calc(100vh - 220px));
-  /* Full-bleed: the pane divider should reach the card's edges, so the two panes
-     scroll against the frame rather than inside an inset. */
-  margin: 0 -20px;
+  /* The two panes span the card edge to edge (the divider reaches the frame). The
+     modal-container has NO side padding — header/search/footer carry their own —
+     so this is margin:0, NOT the -20px that assumed a padded .modal-body wrapper.
+     That stray -20px pushed the list 20px past both edges (clipped by the card's
+     overflow:hidden), which is the "no left/right margin, everything misaligned"
+     the user reported. Each pane's own padding is the gutter. */
+  margin: 0;
   overflow: hidden;
 }
 .cmd-palette-list-pane {

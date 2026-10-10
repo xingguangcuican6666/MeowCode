@@ -2096,8 +2096,11 @@ export const CLIENT_APP_JS = `/**
     const line = '/' + name + (finalArgs ? ' ' + finalArgs : '');
     try {
       const res = await sdk.api.runCommand(line);
-      // The command's own prints come back as messages; render them in the
-      // transcript instead of dropping them on the floor.
+      // The command's own prints come back as messages. Render them, THEN refresh
+      // the lightweight state (config/usage/running) with keepTranscript so the
+      // refresh does not wipe what we just rendered — the bug behind "命令输入无效,
+      // 什么都没发生" was syncState() re-rendering from the server's persisted
+      // messages, which never include a command's transient output.
       for (const msg of (res.messages || [])) {
         // \`print\` produced it: a real transcript row, not a toast. \`send\` produced
         // it: the command wanted to talk to the agent, so the server already ran
@@ -2108,7 +2111,7 @@ export const CLIENT_APP_JS = `/**
           appendNotice(msg.content, msg.meta && msg.meta.error);
         }
       }
-      await syncState();
+      await syncState({ keepTranscript: true });
     } catch (e) {
       sdk.ui.showToast({ message: '/' + name + ': ' + e.message, type: 'error' });
     }
@@ -2939,7 +2942,7 @@ export const CLIENT_APP_JS = `/**
   }
 
   // --- Sync State from Server ---
-  async function syncState() {
+  async function syncState(opts) {
     try {
       const st = await sdk.api.getState();
       currentSessionId = st.sessionId;
@@ -2950,7 +2953,14 @@ export const CLIENT_APP_JS = `/**
       // the server's shell locale so a remote browser sees the host's language.
       syncLanguageFromConfig(appConfig);
       setRunningState(Boolean(st.isRunning));
-      renderExistingMessages(messages);
+      // keepTranscript: a command just rendered its own output (and the user's
+      // command line) into the transcript, and that output is NOT part of the
+      // server's persisted messages — re-rendering here would wipe it, which is
+      // exactly why "/help" and friends looked like they did nothing. The meta
+      // above (config/usage/running) still refreshes; only the destructive
+      // re-render is skipped. A session-mutating command (/clear, /new) re-renders
+      // through its own session:state SSE broadcast, not through here.
+      if (!(opts && opts.keepTranscript)) renderExistingMessages(messages);
       sdk.emit('usage:update', currentUsage);
       renderAllSlots();
       await loadSessionList();
