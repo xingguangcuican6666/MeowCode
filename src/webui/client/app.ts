@@ -518,9 +518,15 @@ export const CLIENT_APP_JS = `/**
   }
 
   function appendThinking(text) {
-    const cardWrap = ensureAssistantCard();
-    if (!activeTurnThinkingCard) {
-      const card = document.createElement('div');
+    const container = ensureAssistantCard();
+    // Append a NEW thinking card in emission order (unless the previous block IS
+    // an open thinking card we can keep filling). The old code prepended ONE card
+    // to the top of the turn and merged all reasoning into it, so a turn that went
+    // think → tool → think → answer rendered as think+think (top), answer, tool —
+    // reordered. Keying off the last child keeps the turn linear.
+    let card = container.lastElementChild;
+    if (!card || !card.classList.contains('thinking-card')) {
+      card = document.createElement('div');
       card.className = 'thinking-card';
       card.innerHTML = \`
         <div class="thinking-header">
@@ -539,12 +545,10 @@ export const CLIENT_APP_JS = `/**
         body.style.display = isHidden ? 'block' : 'none';
         header.querySelector('.thinking-toggle-icon').textContent = isHidden ? 'expand_more' : 'chevron_right';
       });
-
-      cardWrap.prepend(card);
-      activeTurnThinkingCard = card;
-      activeTurnThinkingBody = body;
+      container.appendChild(card);
     }
-
+    activeTurnThinkingCard = card;
+    activeTurnThinkingBody = card.querySelector('.thinking-body');
     if (activeTurnThinkingBody) {
       activeTurnThinkingBody.textContent += text;
       scrollToBottom();
@@ -558,8 +562,11 @@ export const CLIENT_APP_JS = `/**
       if (pulse) pulse.style.animation = 'none';
     }
 
-    let textNode = container.querySelector('.assistant-live-text');
-    if (!textNode) {
+    // Continue the current text run, but start a NEW one if a tool card or a
+    // thinking card was emitted since — so text that comes AFTER a tool renders
+    // after it, not merged back into the pre-tool paragraph.
+    let textNode = container.lastElementChild;
+    if (!textNode || !textNode.classList.contains('assistant-live-text')) {
       textNode = document.createElement('div');
       textNode.className = 'assistant-live-text';
       container.appendChild(textNode);
@@ -3416,8 +3423,12 @@ export const CLIENT_APP_JS = `/**
         }
         const sync = () => {
           if (!q.multiSelect) {
+            // Radios share one name, so the browser already unchecked the
+            // siblings. DON'T uncheck them by hand here: the old code cleared
+            // EVERY input — including the one just clicked — before reading
+            // input.checked, so the read was always false and nothing could ever
+            // be selected (the "cannot select anything" report).
             picks.length = 0;
-            list.querySelectorAll('input').forEach((el) => { el.checked = false; });
             if (input.checked) picks.push(label);
           } else {
             const at = picks.indexOf(label);
