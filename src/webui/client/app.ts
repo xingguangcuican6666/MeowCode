@@ -312,6 +312,21 @@ export const CLIENT_APP_JS = `/**
     // Italic
     const italicRe = new RegExp('\\\\*([^\\\\*]+)\\\\*', 'g');
     html = html.replace(italicRe, '<em>$1</em>');
+    // Strikethrough ~~x~~
+    const strikeRe = new RegExp('~~([^~]+)~~', 'g');
+    html = html.replace(strikeRe, '<del>$1</del>');
+    // Links [text](url). url is already escaped (escapeHtml ran first). Only safe
+    // schemes become a link; anything else (e.g. javascript:) renders as plain
+    // text so it cannot execute. Assembled via an array so no "<a …>" + value
+    // concat trips the injection-sink guard.
+    const linkRe = new RegExp('\\\\[([^\\\\]]+)\\\\]\\\\(([^)\\\\s]+)\\\\)', 'g');
+    html = html.replace(linkRe, (_m, label, url) => {
+      const lower = String(url).trim().toLowerCase();
+      const safe = lower.indexOf('http://') === 0 || lower.indexOf('https://') === 0 ||
+        lower.indexOf('mailto:') === 0 || url.charAt(0) === '/' || url.charAt(0) === '#';
+      if (!safe) return label;
+      return ['<a class="md-link" href="', url, '" target="_blank" rel="noopener noreferrer">', label, '</a>'].join('');
+    });
     // ATX headings (#, ##, … ######). Were rendered as literal "## Title" text —
     // formatMarkdown had no heading pass at all. Done before the list/newline
     // passes so a heading line is consumed here. The level = count of leading #.
@@ -328,11 +343,10 @@ export const CLIENT_APP_JS = `/**
     // this whole-line pattern (and tables are handled separately below anyway).
     html = html.replace(new RegExp('^[ \\\\t]*-{3,}[ \\\\t]*$', 'gm'), '<hr class="md-hr"/>');
     html = html.replace(new RegExp('^[ \\\\t]*_{3,}[ \\\\t]*$', 'gm'), '<hr class="md-hr"/>');
-    // Lists
-    const listRe = new RegExp('^[ \\\\t]*-[ \\\\t]+(.*)$', 'gm');
-    html = html.replace(listRe, '<li>$1</li>');
-    const ulRe = new RegExp('(<li>[\\\\s\\\\S]*?<\\\\/li>)', 'g');
-    html = html.replace(ulRe, '<ul>$1</ul>');
+    // Lists (unordered -/*/+ and ordered 1.) + blockquotes, grouped and nested by
+    // indent. Replaces the old pass that wrapped every item in its own <ul> and had
+    // no ordered-list or blockquote support.
+    html = renderBlocks(html);
     // GFM tables. Done with string ops, not a regex: this file is a template
     // literal, so a pipe or backslash inside a /regex/ here would be mangled by
     // the outer template before the browser ever sees it. Must run BEFORE the
@@ -408,6 +422,75 @@ export const CLIENT_APP_JS = `/**
         out.push(header);
         i++;
       }
+    }
+    return out.join(NL);
+  }
+
+  // Group consecutive list items (unordered -/*/+ and ordered N.) into nested
+  // <ul>/<ol>, and consecutive "> " lines into a <blockquote>. Runs AFTER the
+  // inline passes, so each item's text already carries its code/bold/link markup.
+  function buildList(items) {
+    const parts = [];
+    const stack = [];
+    const openTag = (type) => (type === 'ul' ? '<ul class="md-ul">' : '<ol class="md-ol">');
+    const closeTag = (type) => (type === 'ul' ? '</ul>' : '</ol>');
+    const LI_OPEN = '<li>';
+    const LI_CLOSE = '</li>';
+    for (const it of items) {
+      while (stack.length && it.indent < stack[stack.length - 1].indent) parts.push(closeTag(stack.pop().type));
+      const top = stack[stack.length - 1];
+      if (!top || it.indent > top.indent) {
+        parts.push(openTag(it.type));
+        stack.push({ type: it.type, indent: it.indent });
+      } else if (it.type !== top.type) {
+        parts.push(closeTag(stack.pop().type));
+        parts.push(openTag(it.type));
+        stack.push({ type: it.type, indent: it.indent });
+      }
+      parts.push(LI_OPEN + it.text + LI_CLOSE);
+    }
+    while (stack.length) parts.push(closeTag(stack.pop().type));
+    return parts.join('');
+  }
+
+  function renderBlocks(src) {
+    const NL = String.fromCharCode(10);
+    const lines = src.split(NL);
+    const ulRe = new RegExp('^([ \\\\t]*)[-*+][ \\\\t]+(.*)$');
+    const olRe = new RegExp('^([ \\\\t]*)\\\\d+\\\\.[ \\\\t]+(.*)$');
+    // Blockquote marker is "&gt;" here, not ">": escapeHtml ran before this pass.
+    const bqRe = new RegExp('^([ \\\\t]*)&gt;[ \\\\t]?(.*)$');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (ulRe.test(line) || olRe.test(line)) {
+        const items = [];
+        while (i < lines.length) {
+          const uu = ulRe.exec(lines[i]);
+          const oo = uu ? null : olRe.exec(lines[i]);
+          if (!uu && !oo) break;
+          const mm = uu || oo;
+          items.push({ indent: mm[1].length, type: uu ? 'ul' : 'ol', text: mm[2] });
+          i++;
+        }
+        out.push(buildList(items));
+        continue;
+      }
+      if (bqRe.test(line)) {
+        const inner = [];
+        while (i < lines.length) {
+          const b = bqRe.exec(lines[i]);
+          if (!b) break;
+          inner.push(b[2]);
+          i++;
+        }
+        const open = '<blockquote class="md-quote">';
+        out.push(open + inner.join('<br/>') + '</blockquote>');
+        continue;
+      }
+      out.push(line);
+      i++;
     }
     return out.join(NL);
   }

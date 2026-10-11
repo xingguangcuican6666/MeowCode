@@ -2379,6 +2379,30 @@ md-assist-chip, md-filter-chip {
   border-top: 1px solid var(--md-sys-color-outline-variant);
   margin: 14px 0;
 }
+/* Markdown lists, blockquotes, links, strikethrough — the pieces formatMarkdown
+   gained alongside headings/tables so they stop showing as raw text. */
+.md-ul, .md-ol {
+  margin: 6px 0 8px;
+  padding-left: 22px;
+}
+.md-ul { list-style: disc; }
+.md-ol { list-style: decimal; }
+.md-ul .md-ul, .md-ul .md-ol, .md-ol .md-ul, .md-ol .md-ol { margin: 2px 0; }
+.md-ul li, .md-ol li { margin: 2px 0; }
+.md-quote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container);
+  border-radius: 0 var(--md-shape-sm) var(--md-shape-sm) 0;
+}
+.md-link {
+  color: var(--md-sys-color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md-link:hover { filter: brightness(1.1); }
 
 /* Markdown tables (GFM). formatMarkdown emits .md-table; without these it was a
    wall of raw " | a | b | " text the newline pass turned into loose <br/> rows. */

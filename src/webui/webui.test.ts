@@ -68,11 +68,15 @@ function liftFunction(source: string, name: string): string {
 }
 
 // escapeHtml is formatMarkdown's only defence, so the pair has to travel together.
-// renderTables is a sibling formatMarkdown now calls, so it travels too.
+// renderTables/renderBlocks/buildList are siblings formatMarkdown now calls too.
 const markdownBody =
   liftFunction(CLIENT_APP_JS, 'escapeHtml') +
   '\n' +
   liftFunction(CLIENT_APP_JS, 'renderTables') +
+  '\n' +
+  liftFunction(CLIENT_APP_JS, 'buildList') +
+  '\n' +
+  liftFunction(CLIENT_APP_JS, 'renderBlocks') +
   '\n' +
   liftFunction(CLIENT_APP_JS, 'formatMarkdown')
 
@@ -856,6 +860,33 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(run('a\n\n---\n\nb')).toContain('md-hr')
     expect(run('a\n\n___\n\nb')).toContain('md-hr')
     expect(run('| x | y |\n|---|---|\n| 1 | 2 |')).not.toContain('md-hr')
+  })
+
+  it('renders ordered/nested lists, blockquotes, links and strikethrough', () => {
+    const run = new Function(markdownBody + '\nreturn formatMarkdown;')() as (t: string) => string
+
+    // Ordered list → <ol> with one item per line (not literal "1." text).
+    const ol = run('1. first\n2. second\n3. third')
+    expect(ol).toContain('md-ol')
+    expect((ol.match(/<li>/g) || []).length).toBe(3)
+
+    // Unordered items group into ONE <ul>, and an indented run nests.
+    const nested = run('- a\n  - a1\n  - a2\n- b')
+    expect((nested.match(/<ul/g) || []).length).toBeGreaterThanOrEqual(2)
+
+    // Blockquote: the marker is "&gt;" by the time this pass runs (escaped first).
+    expect(run('> quoted\n> more')).toContain('md-quote')
+
+    // Links: only safe schemes become anchors; javascript: renders as plain text.
+    expect(run('see [docs](https://example.com)')).toContain('<a class="md-link" href="https://example.com"');
+    const evil = run('[x](javascript:alert(1))')
+    expect(evil).not.toContain('<a')
+    expect(evil).toContain('x')
+    // A link label is still escaped.
+    expect(run('[<img>](https://e.com)')).not.toContain('<img')
+
+    // Strikethrough.
+    expect(run('a ~~b~~ c')).toContain('<del>b</del>')
   })
 
   it('starts a fresh assistant card for each turn when a transcript is re-rendered', () => {
