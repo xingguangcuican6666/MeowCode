@@ -2360,6 +2360,20 @@ md-assist-chip, md-filter-chip {
 .assistant-live-text ul { margin-left: 20px; margin-bottom: 10px; list-style: disc; }
 .assistant-live-text li { margin-bottom: 4px; }
 
+/* Markdown ATX headings. formatMarkdown emits .md-heading (+ .md-hN for the
+   level); before this, "## Title" rendered as literal text. Tight top/bottom
+   margins because the surrounding newlines already become <br/>. */
+.md-heading {
+  font-weight: 700;
+  color: var(--md-sys-color-on-surface);
+  line-height: 1.3;
+  margin: 10px 0 2px;
+}
+.md-h1 { font-size: 20px; }
+.md-h2 { font-size: 17px; }
+.md-h3 { font-size: 15px; }
+.md-h4, .md-h5, .md-h6 { font-size: 13.5px; }
+
 /* Markdown tables (GFM). formatMarkdown emits .md-table; without these it was a
    wall of raw " | a | b | " text the newline pass turned into loose <br/> rows. */
 .md-table {

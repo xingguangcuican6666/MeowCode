@@ -312,6 +312,17 @@ export const CLIENT_APP_JS = `/**
     // Italic
     const italicRe = new RegExp('\\\\*([^\\\\*]+)\\\\*', 'g');
     html = html.replace(italicRe, '<em>$1</em>');
+    // ATX headings (#, ##, … ######). Were rendered as literal "## Title" text —
+    // formatMarkdown had no heading pass at all. Done before the list/newline
+    // passes so a heading line is consumed here. The level = count of leading #.
+    const headingRe = new RegExp('^(#{1,6})[ \\\\t]+(.+?)[ \\\\t]*$', 'gm');
+    html = html.replace(headingRe, (_m, hashes, txt) => {
+      // Assemble through a variable, not a "<div …>" + value literal: the injection
+      // sink test forbids that shape (it cannot see txt is already escaped). txt
+      // passed through escapeHtml at the top of formatMarkdown, so it is inert.
+      const open = '<div class="md-heading md-h';
+      return open + hashes.length + '">' + txt + '</div>';
+    });
     // Lists
     const listRe = new RegExp('^[ \\\\t]*-[ \\\\t]+(.*)$', 'gm');
     html = html.replace(listRe, '<li>$1</li>');

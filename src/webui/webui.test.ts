@@ -839,6 +839,20 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(run('a | b not a table')).not.toContain('<table')
   })
 
+  it('renders ATX headings instead of literal ## text', () => {
+    // "## WebUI" used to render verbatim — formatMarkdown had no heading pass.
+    const run = new Function(markdownBody + '\nreturn formatMarkdown;')() as (t: string) => string
+    const out = run('## WebUI\n\nbody\n\n### 典型请求流')
+    expect(out).toContain('md-h2')
+    expect(out).toContain('>WebUI</div>')
+    expect(out).toContain('md-h3')
+    expect(out).not.toContain('## WebUI')
+    // A hash with no space is NOT a heading (e.g. a CSS color or an issue ref).
+    expect(run('#notaheading')).not.toContain('md-heading')
+    // The heading text is still escaped.
+    expect(run('## <img src=x>')).not.toContain('<img')
+  })
+
   it('starts a fresh assistant card for each turn when a transcript is re-rendered', () => {
     // renderExistingMessages must null activeTurnAssistantEl when it renders a user
     // message. Without it ensureAssistantCard() keeps returning the first turn's
