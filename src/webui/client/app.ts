@@ -323,6 +323,11 @@ export const CLIENT_APP_JS = `/**
       const open = '<div class="md-heading md-h';
       return open + hashes.length + '">' + txt + '</div>';
     });
+    // Horizontal rule: a line of only --- or ___ (3+). Rendered as literal dashes
+    // before. A GFM table's |---| separator keeps its pipes, so it never matches
+    // this whole-line pattern (and tables are handled separately below anyway).
+    html = html.replace(new RegExp('^[ \\\\t]*-{3,}[ \\\\t]*$', 'gm'), '<hr class="md-hr"/>');
+    html = html.replace(new RegExp('^[ \\\\t]*_{3,}[ \\\\t]*$', 'gm'), '<hr class="md-hr"/>');
     // Lists
     const listRe = new RegExp('^[ \\\\t]*-[ \\\\t]+(.*)$', 'gm');
     html = html.replace(listRe, '<li>$1</li>');

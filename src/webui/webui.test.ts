@@ -851,6 +851,11 @@ describe('MeowCode Built-in WebUI & Extension SDK', () => {
     expect(run('#notaheading')).not.toContain('md-heading')
     // The heading text is still escaped.
     expect(run('## <img src=x>')).not.toContain('<img')
+    // A line of --- / ___ is a horizontal rule, not literal dashes — but a GFM
+    // table's |---| separator keeps its pipes and stays a table.
+    expect(run('a\n\n---\n\nb')).toContain('md-hr')
+    expect(run('a\n\n___\n\nb')).toContain('md-hr')
+    expect(run('| x | y |\n|---|---|\n| 1 | 2 |')).not.toContain('md-hr')
   })
 
   it('starts a fresh assistant card for each turn when a transcript is re-rendered', () => {

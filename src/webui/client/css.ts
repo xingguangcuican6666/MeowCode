@@ -2373,6 +2373,12 @@ md-assist-chip, md-filter-chip {
 .md-h2 { font-size: 17px; }
 .md-h3 { font-size: 15px; }
 .md-h4, .md-h5, .md-h6 { font-size: 13.5px; }
+/* Markdown thematic break (---). Was literal dashes before. */
+.md-hr {
+  border: none;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  margin: 14px 0;
+}
 
 /* Markdown tables (GFM). formatMarkdown emits .md-table; without these it was a
    wall of raw " | a | b | " text the newline pass turned into loose <br/> rows. */
